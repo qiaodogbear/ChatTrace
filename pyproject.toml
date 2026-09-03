@@ -4,18 +4,19 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "chattrace"
-version = "0.1.0"
-description = "Local WeChat 4.x (4.1.11+) chat data toolchain: Frida KeyAgent + decrypt + export."
+version = "0.2.0"
+description = "Local WeChat 4.x (4.1.11+) chat toolchain: KeyAgent capture, guided Web UI, decrypt, browse, txt/json/html export."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 authors = [{ name = "ChatTrace Maintainers" }]
-keywords = ["wechat", "wcdb", "sqlcipher", "frida", "local-first", "windows"]
+keywords = ["wechat", "wcdb", "sqlcipher", "frida", "local-first", "windows", "webui"]
 classifiers = [
-  "Development Status :: 3 - Alpha",
+  "Development Status :: 4 - Beta",
   "Environment :: Win32 (MS Windows)",
   "Operating System :: Microsoft :: Windows",
   "Programming Language :: Python :: 3",
+  "Topic :: Utilities",
 ]
 dependencies = [
   "frida>=16.0.0",

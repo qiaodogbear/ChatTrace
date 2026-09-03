@@ -7,13 +7,23 @@ from datetime import datetime
 from pathlib import Path
 
 from . import __version__
-from .config import ERR_OK, KeyagentError, keys_dir, logs_dir
+from .config import (
+    ERR_OK,
+    KeyagentError,
+    account_decrypted_dir,
+    account_exports_dir,
+    keys_dir,
+    logs_dir,
+)
 from .keyagent import keystore, wechat_state, version_map
-from .keyagent.account import resolve_account
+from .keyagent.account import Account, discover_accounts, resolve_account
 from .keyagent.agent import capture_key
 from .keyagent.locate_anchors import LocateError, locate_anchors
 from .keyagent.verify import test_key_against_db
 from .models import AnchorSet
+from .service import DecryptService
+from .service.database import DatabaseService
+from .service.exporter import ChatExportService
 
 PROG = "chattrace"
 
@@ -53,6 +63,43 @@ def build_parser() -> argparse.ArgumentParser:
     p_loc = ka_sub.add_parser("locate", help="Statically locate anchors in a Weixin.dll and cache them.")
     p_loc.add_argument("--weixin-dll", required=True)
     p_loc.add_argument("--version", default="", help="WeChat version tag; inferred from path if omitted.")
+
+    data = sub.add_parser("data", help="Decrypt & prepare account databases (needs a stored key).")
+    data_sub = data.add_subparsers(dest="data_command")
+    p_dstat = data_sub.add_parser("status", help="Key + decryption readiness summary.")
+    p_dstat.add_argument("--account-dir", required=True)
+    p_dec = data_sub.add_parser("decrypt", help="Decrypt required DBs (incremental) into the account cache.")
+    p_dec.add_argument("--account-dir", required=True)
+    p_dec.add_argument("--force", action="store_true", help="Re-decrypt everything, ignoring freshness.")
+    p_dec.add_argument("--root", default=None, help="Output root override (default: %%LOCALAPPDATA%%\\ChatTrace\\accounts\\<wxid>).")
+
+    chat = sub.add_parser("chat", help="Browse decrypted chats.")
+    chat_sub = chat.add_subparsers(dest="chat_command")
+    p_sess = chat_sub.add_parser("list", help="List sessions (most recent first).")
+    p_sess.add_argument("--account-dir", required=True)
+    p_sess.add_argument("--query", default="", help="Filter by name / username / summary.")
+    p_sess.add_argument("--limit", type=int, default=40)
+    p_cons = chat_sub.add_parser("contacts", help="List contacts.")
+    p_cons.add_argument("--account-dir", required=True)
+    p_cons.add_argument("--query", default="")
+    p_cons.add_argument("--limit", type=int, default=40)
+    p_read = chat_sub.add_parser("read", help="Read the most recent messages of one chat.")
+    p_read.add_argument("--account-dir", required=True)
+    p_read.add_argument("username", help="Chat username (wxid_xxx / xxx@chatroom).")
+    p_read.add_argument("--limit", type=int, default=30)
+    p_read.add_argument("--before", default=None, help="Older page cursor as 'create_time,local_id'.")
+
+    exp = sub.add_parser("export", help="Export one chat to txt/json/html.")
+    exp.add_argument("--account-dir", required=True)
+    exp.add_argument("--user", default=None, help="Exact chat username.")
+    exp.add_argument("--query", default="", help="Resolve chat by name/username substring.")
+    exp.add_argument("--format", choices=("txt", "json", "html"), default="txt")
+    exp.add_argument("--out", default=None, help="Output file (default: <exports>/<stamp>__<name>.<fmt>).")
+
+    web = sub.add_parser("webui", help="Launch the guided Web UI (opens the browser).")
+    web.add_argument("--host", default="127.0.0.1")
+    web.add_argument("--port", type=int, default=8714)
+    web.add_argument("--no-browser", action="store_true", help="Do not auto-open a browser tab.")
 
     return parser
 
@@ -260,7 +307,193 @@ def cmd_keyagent_locate(args) -> int:
     return ERR_OK
 
 
+def _loaded_key_for(account: Account):
+    """Stored key for an account (any version tag). Raises KeyagentError(9) when absent."""
+    try:
+        return keystore.load_key(account.account_id)
+    except KeyagentError as exc:
+        raise KeyagentError(
+            9,
+            f"no stored key for {account.account_id} — run `keyagent run --store` or `key store` first "
+            f"({exc})",
+        ) from exc
+
+
+def _decrypted_root(account_id: str, override: str | None) -> Path:
+    if override:
+        return Path(override)
+    return account_decrypted_dir(account_id)
+
+
+def cmd_data_status(args) -> int:
+    account = resolve_account(Path(args.account_dir))
+    print(f"account: {account.account_id}")
+    print(f"  dir : {account.account_dir}")
+    try:
+        info = keystore.load_key(account.account_id)
+        when = datetime.fromtimestamp(info.captured_at).strftime("%Y-%m-%d %H:%M")
+        expired = keystore.is_expired(info)
+        print(f"  key : v{info.wechat_version or '?'} fp={info.fingerprint} captured={when} "
+              f"{'EXPIRED (>24h)' if expired else 'ok'}")
+    except KeyagentError as exc:
+        print(f"  key : MISSING ({exc})")
+        return 9
+    svc = DecryptService(account.account_dir / "db_storage", info.password, _decrypted_root(account.account_id, None))
+    status = svc.status()
+    print(f"  dbs : {status['ready']}/{status['total']} decrypted")
+    for row in status["dbs"]:
+        mark = "ok " if row["ready"] else "-- "
+        print(f"    {mark}{row['name']:<45s} {row['size'] / 1e6:7.1f}MB")
+    return ERR_OK
+
+
+def cmd_data_decrypt(args) -> int:
+    account = resolve_account(Path(args.account_dir))
+    info = _loaded_key_for(account)
+    if keystore.is_expired(info):
+        print(f"note: stored key is older than 24h; HMAC may still pass but re-capture is recommended",
+              file=sys.stderr)
+    out = _decrypted_root(account.account_id, args.root)
+    svc = DecryptService(account.account_dir / "db_storage", info.password, out)
+
+    def progress(phase: str, name: str, detail: str) -> None:
+        if phase == "decrypt":
+            print(f"  decrypt {name} ...", flush=True)
+        elif phase == "ok":
+            print(f"  ok      {name}  ({detail})", flush=True)
+        elif phase == "skip":
+            print(f"  skip    {name}  ({detail})", flush=True)
+        elif phase == "fail":
+            print(f"  FAIL    {name}: {detail}", file=sys.stderr)
+
+    report = svc.run(progress=progress, incremental=not args.force)
+    print(f"\nresult: {report.decrypted} decrypted, {report.skipped} fresh, "
+          f"{len(report.failed)} failed of {report.discovered} DBs -> {out}")
+    if report.failed:
+        for name, detail in report.failed:
+            print(f"  failed {name}: {detail}", file=sys.stderr)
+        return 10
+    return ERR_OK
+
+
+def _ensure_decrypted(account: Account, out_root: str | None, quiet: bool = False) -> Path:
+    """Decrypt incrementally when needed; returns the decrypted tree root."""
+    out = _decrypted_root(account.account_id, out_root)
+    probe = DecryptService(account.account_dir / "db_storage", b"", out)
+    status = probe.status()
+    if status["ready"] >= status["total"]:
+        return out
+    info = _loaded_key_for(account)
+    report = DecryptService(account.account_dir / "db_storage", info.password, out).run(
+        progress=None if quiet else (lambda phase, name, detail: None)
+    )
+    if report.failed:
+        raise KeyagentError(10, f"{len(report.failed)} DB(s) failed to decrypt: "
+                                f"{', '.join(n for n, _ in report.failed[:5])}")
+    return out
+
+
+def _open_db(args) -> tuple[Account, DatabaseService]:
+    account = resolve_account(Path(args.account_dir))
+    out = _ensure_decrypted(account, getattr(args, "root", None))
+    return account, DatabaseService(account.account_id, out)
+
+
+def cmd_chat_list(args) -> int:
+    account, db = _open_db(args)
+    sessions = db.sessions(query=args.query or None, limit=args.limit)
+    print(f"{len(sessions)} session(s) for {account.account_id}:\n")
+    for s in sessions:
+        when = datetime.fromtimestamp(s.last_timestamp).strftime("%Y-%m-%d %H:%M") if s.last_timestamp else "-"
+        summary = (s.summary or "").replace("\n", " ")[:60]
+        print(f"{s.display_name[:22]:24s} {when:17s} u{s.unread_count:<3d} {summary}")
+        print(f"    {s.username}")
+    return ERR_OK
+
+
+def cmd_chat_contacts(args) -> int:
+    account, db = _open_db(args)
+    contacts = db.contacts(query=args.query or None, limit=args.limit)
+    print(f"{len(contacts)} contact(s) for {account.account_id}:")
+    for c in contacts:
+        print(f"  {c.display_name[:24]:26s} {c.username}")
+    return ERR_OK
+
+
+def cmd_chat_read(args) -> int:
+    account, db = _open_db(args)
+    before = None
+    if args.before:
+        try:
+            ct_s, lid_s = args.before.split(",")
+            before = (int(ct_s), int(lid_s))
+        except ValueError:
+            print("error: --before must look like '1720000000,123'", file=sys.stderr)
+            return 9
+    page = db.chat(args.username, limit=args.limit, before=before)
+    if not page.messages:
+        print(f"no messages for {args.username}")
+        return ERR_OK
+    print(f"{page.contact.display_name} ({args.username}) — newest {len(page.messages)}"
+          f"{'+, older available' if page.has_more else ''}:")
+    for m in reversed(page.messages):
+        who = "me" if m.is_outgoing else m.sender
+        when = datetime.fromtimestamp(m.create_time).strftime("%m-%d %H:%M")
+        tag = f"[{m.display_type}] " if m.display_type != "text" else ""
+        print(f"  {when} {who[:14]:16s} {tag}{m.text[:140]}")
+    if page.has_more:
+        oldest = page.messages[0]
+        print(f"\nolder messages: chattrace chat read --account-dir \"{args.account_dir}\" "
+              f"{args.username} --before {oldest.create_time},{oldest.local_id}")
+    return ERR_OK
+
+
+def _resolve_chat_username(db: DatabaseService, user: str | None, query: str) -> str:
+    if user:
+        if db.contact(user) is not None or db.session(user):
+            return user
+        raise KeyagentError(8, f"chat not found: {user}")
+    if query:
+        hits = [s for s in db.sessions(limit=400) if query.lower() in s.search_blob]
+        if len(hits) == 1:
+            return hits[0].username
+        if len(hits) > 1:
+            raise KeyagentError(8, f"ambiguous query {query!r}; pass --user with the exact username")
+        c_hits = db.contacts(query=query, limit=2)
+        if len(c_hits) == 1:
+            return c_hits[0].username
+        raise KeyagentError(8, f"no chat matched query {query!r}")
+    raise KeyagentError(8, "need --user or --query")
+
+
+def cmd_export(args) -> int:
+    account, db = _open_db(args)
+    username = _resolve_chat_username(db, args.user, args.query)
+    contact = db.contact(username)
+    display = contact.display_name if contact else username
+    print(f"exporting {display} ({username}) -> {args.format} ...")
+    total = db.count_messages(username) or 0
+
+    def progress(done: int, _total: int | None) -> None:
+        print(f"\r  {done}/{total}", end="", flush=True)
+
+    try:
+        outcome = ChatExportService(db, account_exports_dir(account.account_id)).export(
+            username, args.format, progress=progress, output_path=Path(args.out) if args.out else None
+        )
+    except Exception as exc:
+        raise KeyagentError(10, f"export failed: {exc}") from exc
+    print()
+    print(f"exported {outcome.message_count} messages -> {outcome.output_path}")
+    return ERR_OK
+
+
 def main(argv: list[str] | None = None) -> int:
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
+        except Exception:
+            pass
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
@@ -284,6 +517,30 @@ def main(argv: list[str] | None = None) -> int:
                 return cmd_keyagent_locate(args)
             parser.parse_args(["keyagent", "--help"])
             return 1
+        if args.command == "data":
+            if args.data_command == "status":
+                return cmd_data_status(args)
+            if args.data_command == "decrypt":
+                return cmd_data_decrypt(args)
+            parser.parse_args(["data", "--help"])
+            return 1
+        if args.command == "chat":
+            if args.chat_command == "list":
+                return cmd_chat_list(args)
+            if args.chat_command == "contacts":
+                return cmd_chat_contacts(args)
+            if args.chat_command == "read":
+                return cmd_chat_read(args)
+            parser.parse_args(["chat", "--help"])
+            return 1
+        if args.command == "export":
+            return cmd_export(args)
+        if args.command == "webui":
+            from .webui.server import main as webui_main
+
+            return webui_main(
+                ["--host", args.host, "--port", str(args.port)] + (["--no-browser"] if args.no_browser else [])
+            )
         parser.print_help()
         return 1
     except (KeyagentError, FileNotFoundError, ValueError) as exc:

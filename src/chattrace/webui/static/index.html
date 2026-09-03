@@ -1,0 +1,613 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ChatTrace · 微信数据工具</title>
+<style>
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+body { font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif; background: #0e1013; color: #e8eaed; margin: 0; }
+a { color: #7cb3ff; text-decoration: none; }
+header { display: flex; align-items: center; gap: 14px; padding: 10px 18px; background: #15181d; border-bottom: 1px solid #262b33; position: sticky; top: 0; z-index: 5; }
+header .logo { font-weight: 700; font-size: 17px; letter-spacing: .3px; }
+header .logo b { color: #3ecf8e; }
+nav.steps { display: flex; gap: 4px; flex: 1; overflow-x: auto; }
+nav.steps button { border: 0; background: transparent; color: #8b929c; padding: 8px 12px; border-radius: 8px; cursor: pointer; font-size: 13px; white-space: nowrap; }
+nav.steps button.active { background: #1e5a42; color: #b9f6d4; }
+nav.steps button:disabled { opacity: .45; cursor: not-allowed; }
+#pillbox { display: flex; gap: 6px; align-items: center; font-size: 12px; }
+.pill { padding: 3px 9px; border-radius: 20px; background: #232830; border: 1px solid #2f3742; color: #c3c9d1; }
+.pill.ok { background: #14301f; border-color: #25603c; color: #9fe8bd; }
+.pill.warn { background: #33270f; border-color: #7a5c16; color: #ffd479; }
+.pill.bad { background: #3a1620; border-color: #8a2a3a; color: #ff9daf; }
+main { max-width: 1180px; margin: 0 auto; padding: 18px 20px 80px; }
+.screen { display: none; }
+.screen.active { display: block; }
+h2 { font-size: 19px; margin: 4px 0 4px; }
+.sub { color: #8b929c; font-size: 13px; margin: 0 0 18px; }
+.card { background: #15181d; border: 1px solid #232830; border-radius: 14px; padding: 16px; margin-bottom: 14px; }
+.rowline { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+button.btn { background: #232a34; border: 1px solid #38414e; color: #e6e9ed; border-radius: 9px; padding: 8px 14px; font-size: 13px; cursor: pointer; }
+button.btn:hover { background: #2b343f; }
+button.btn.primary { background: #178a5a; border-color: #1fa871; color: #fff; font-weight: 600; }
+button.btn.primary:hover { background: #1b9e68; }
+button.btn.ghost { background: transparent; }
+button.btn.danger { background: #7c2636; border-color: #a03549; }
+button.btn:disabled { opacity: .45; cursor: not-allowed; }
+input[type=text], input[type=password], select { background: #101318; border: 1px solid #2c333d; color: #e8eaed; border-radius: 8px; padding: 8px 11px; font-size: 13px; outline: none; }
+input:focus, select:focus { border-color: #2f8f63; }
+.field { margin: 8px 0; }
+.field label { display: block; font-size: 12px; color: #9aa2ab; margin-bottom: 5px; }
+.mono { font-family: Consolas, monospace; }
+table.dbs { width: 100%; border-collapse: collapse; font-size: 13px; }
+table.dbs td, table.dbs th { padding: 5px 8px; border-bottom: 1px solid #1e232b; text-align: left; }
+.chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.chip { display: flex; align-items: center; gap: 8px; background: #1b2027; border: 1px solid #2a323c; border-radius: 10px; padding: 8px 12px; cursor: pointer; font-size: 13px; max-width: 340px; }
+.chip:hover { border-color: #3a8a64; }
+.chip .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip .id { color: #7c858f; font-size: 11px; font-family: Consolas, monospace; }
+.badge-dot { width: 8px; height: 8px; border-radius: 50%; background: #3a434e; flex: none; }
+.badge-dot.on { background: #3ecf8e; }
+.tasklog { background: #0b0d10; border: 1px solid #1f242b; border-radius: 10px; padding: 10px 12px; font: 12px/1.7 Consolas, monospace; max-height: 260px; overflow-y: auto; white-space: pre-wrap; }
+.tasklog .err { color: #ff9daf; }
+.tasklog .done { color: #9fe8bd; }
+.empty { color: #6d757f; font-size: 13px; padding: 14px 4px; }
+.split { display: grid; grid-template-columns: 320px 1fr; gap: 14px; align-items: start; }
+@media (max-width: 900px) { .split { grid-template-columns: 1fr; } }
+#sessList { max-height: 72vh; overflow-y: auto; }
+.sess { display: block; width: 100%; text-align: left; background: transparent; border: 0; border-bottom: 1px solid #1c2129; padding: 9px 10px; cursor: pointer; color: inherit; border-radius: 8px; }
+.sess:hover { background: #1a2028; }
+.sess.active { background: #163c2b; }
+.sess .t1 { display: flex; justify-content: space-between; font-size: 13px; }
+.sess .t1 .who { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 210px; }
+.sess .t1 .when { color: #7c858f; font-size: 11px; flex: none; margin-left: 8px; }
+.sess .t2 { color: #9aa2ab; font-size: 12px; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sess .unread { background: #b93a4f; color: #fff; border-radius: 10px; font-size: 10px; padding: 1px 6px; }
+#chatPanel { border: 1px solid #232830; border-radius: 14px; background: #13161b; min-height: 60vh; display: flex; flex-direction: column; }
+#chatHead { padding: 12px 16px; border-bottom: 1px solid #22282f; display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+#chatHead .who { font-weight: 700; }
+#chatHead .id { color: #7c858f; font-size: 11px; font-family: Consolas, monospace; }
+#chatBody { flex: 1; overflow-y: auto; padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; max-height: 62vh; }
+.msg { display: flex; flex-direction: column; max-width: 74%; }
+.msg.me { align-self: flex-end; align-items: flex-end; }
+.msg .bubble { background: #1e2329; border: 1px solid #2a313a; padding: 7px 11px; border-radius: 11px; font-size: 14px; line-height: 1.55; word-break: break-word; white-space: pre-wrap; }
+.msg.me .bubble { background: #1d4f37; border-color: #2a6b4b; }
+.msg .who { font-size: 11px; color: #8b929c; margin: 2px 6px; }
+.msg .tag { color: #e8c76a; font-size: 11px; margin-right: 5px; }
+.msg .links { font-size: 12px; margin-top: 4px; }
+.msg .time { font-size: 10px; color: #5d6570; margin: 2px 6px 0; }
+#moreBtn { align-self: center; margin: 8px 0; }
+#taskToast { position: fixed; right: 18px; bottom: 18px; width: 420px; max-width: 92vw; background: #161a20; border: 1px solid #2a323c; border-radius: 12px; padding: 12px; box-shadow: 0 8px 30px rgba(0,0,0,.5); display: none; z-index: 20; }
+#taskToast h4 { margin: 0 0 8px; font-size: 13px; }
+#taskToast .close { float: right; cursor: pointer; color: #8b929c; }
+#resultBox { margin-top: 10px; }
+kbd { background: #1e242c; border: 1px solid #333c47; border-bottom-width: 2px; border-radius: 5px; padding: 1px 6px; font-size: 12px; }
+.tabs { display: flex; gap: 2px; margin-bottom: 10px; }
+.tabs button { border: 0; background: transparent; color: #98a0aa; padding: 6px 10px; border-bottom: 2px solid transparent; cursor: pointer; font-size: 13px; }
+.tabs button.active { color: #fff; border-bottom-color: #3ecf8e; }
+.searchrow { display: flex; gap: 8px; margin-bottom: 10px; }
+.searchrow input { flex: 1; }
+.hint { color: #7c858f; font-size: 12px; }
+.big-num { font-size: 26px; font-weight: 700; }
+.statgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+.stat { background: #15181d; border: 1px solid #232830; border-radius: 12px; padding: 12px 14px; }
+.stat .k { color: #8b929c; font-size: 12px; }
+.stat .v { font-size: 20px; font-weight: 700; margin-top: 2px; }
+.steptitle { display: flex; gap: 10px; align-items: baseline; }
+.steptitle .n { background: #2a5c45; color: #c9ffe2; border-radius: 50%; width: 26px; height: 26px; display: inline-flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 700; }
+.steptitle.done .n { background: #1fa871; }
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">Chat<b>Trace</b></div>
+  <nav class="steps" id="steps">
+    <button data-step="1" class="active">1 · 选择账号</button>
+    <button data-step="2" disabled>2 · 密钥</button>
+    <button data-step="3" disabled>3 · 解密数据</button>
+    <button data-step="4" disabled>4 · 浏览聊天</button>
+    <button data-step="5" disabled>5 · 导出</button>
+  </nav>
+  <div id="pillbox"></div>
+</header>
+
+<main>
+  <!-- ============ STEP 1: account ============ -->
+  <section class="screen active" id="screen-1">
+    <div class="steptitle"><span class="n">1</span><h2>选择微信账号</h2></div>
+    <p class="sub">ChatTrace 读取本机微信 4.x（4.1.11+）的账号数据。选择一个 <b>xwechat_files 根目录</b>，或直接指定账号目录。</p>
+    <div class="card">
+      <div class="rowline">
+        <input type="text" id="rootInput" style="flex:1" placeholder="xwechat_files 根目录路径，例如 D:\…\xwechat_files">
+        <button class="btn" onclick="scanRoot()">扫描该目录</button>
+        <button class="btn ghost" onclick="browseDir()">📁 浏览选择…</button>
+      </div>
+      <div class="hint" style="margin-top:8px">提示：微信 4.x 数据默认在 <kbd>文档\xwechat_files</kbd>；也可扫其他盘的迁移目录。</div>
+    </div>
+    <div id="accountResults"></div>
+  </section>
+
+  <!-- ============ STEP 2: key ============ -->
+  <section class="screen" id="screen-2">
+    <div class="steptitle"><span class="n">2</span><h2>密钥（一次性自动获取）</h2></div>
+    <p class="sub">微信数据库使用 32 字节主密钥加密。首次使用需自动捕获一次；密钥仅保存在本机（DPAPI 保护），之后无需微信在线。</p>
+    <div class="card" id="keyCard"></div>
+    <div class="card">
+      <div class="tabs">
+        <button class="active" onclick="tabManual(false,this)">已有关键信息（高级）</button>
+      </div>
+      <div class="field">
+        <label>粘贴 64 位十六进制主密钥（来自记忆扫描 / 旧工具）</label>
+        <input type="password" id="manualHex" class="mono" style="width:100%" placeholder="64 hex chars…">
+      </div>
+      <button class="btn" onclick="storeManualKey()">校验并保存</button>
+      <div id="manualResult"></div>
+    </div>
+  </section>
+
+  <!-- ============ STEP 3: decrypt ============ -->
+  <section class="screen" id="screen-3">
+    <div class="steptitle"><span class="n">3</span><h2>解密数据</h2></div>
+    <p class="sub">把加密数据库解密为明文副本（保留原文件，解密副本仅用于本地读取/导出，支持增量刷新）。</p>
+    <div class="card">
+      <div class="rowline" style="justify-content:space-between">
+        <div id="decryptSummary" class="hint">正在读取状态…</div>
+        <div style="display:flex;gap:8px">
+          <button class="btn" id="refreshDbsBtn" onclick="loadDecryptStatus()">刷新</button>
+          <button class="btn primary" id="decryptBtn" onclick="startDecrypt(false)">解密 / 增量刷新</button>
+          <button class="btn ghost" id="decryptForceBtn" onclick="startDecrypt(true)">强制重解密</button>
+        </div>
+      </div>
+      <table class="dbs" id="dbTable" style="margin-top:10px"></table>
+    </div>
+  </section>
+
+  <!-- ============ STEP 4: browse ============ -->
+  <section class="screen" id="screen-4">
+    <div class="steptitle"><span class="n">4</span><h2>浏览聊天</h2></div>
+    <p class="sub">搜索会话或联系人并阅读消息记录（仅本地明文副本）。</p>
+    <div class="split">
+      <div>
+        <div class="tabs">
+          <button class="active" id="tabSess" onclick="switchBrowse('sessions',this)">会话</button>
+          <button id="tabCont" onclick="switchBrowse('contacts',this)">联系人</button>
+        </div>
+        <div class="searchrow">
+          <input type="text" id="sessSearch" placeholder="搜索名称 / 备注 / 内容…" onkeyup="searchBrowse(event)">
+        </div>
+        <div id="sessList"></div>
+      </div>
+      <div id="chatPanel">
+        <div id="chatHead">
+          <div>
+            <div class="who" id="chatWho">选择一个会话</div>
+            <div class="id" id="chatId"></div>
+          </div>
+          <div class="rowline">
+            <button class="btn primary" id="exportBtn" onclick="openExportTab()">导出…</button>
+          </div>
+        </div>
+        <div id="chatBody"><div class="empty" style="padding:40px">左侧选择一个会话开始阅读。</div></div>
+        <div id="moreWrap" style="text-align:center;padding:6px"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ STEP 5: export ============ -->
+  <section class="screen" id="screen-5">
+    <div class="steptitle"><span class="n">5</span><h2>导出</h2></div>
+    <p class="sub">把整个会话导出为可长期保存、可迁移的文件。</p>
+    <div class="card">
+      <div class="field">
+        <label>会话</label>
+        <input type="text" id="exportUser" readonly>
+      </div>
+      <div class="rowline">
+        <select id="exportFmt">
+          <option value="txt">.txt — 纯文本（易读、轻量）</option>
+          <option value="json">.json — 结构化数据（脚本/迁移）</option>
+          <option value="html" selected>.html — 网页气泡视图（自包含）</option>
+        </select>
+        <button class="btn primary" onclick="startExport()">开始导出</button>
+      </div>
+      <div id="resultBox"></div>
+    </div>
+  </section>
+</main>
+
+<div id="taskToast">
+  <h4><span class="close" onclick="hideToast()">✕</span><span id="toastTitle">任务</span></h4>
+  <div class="tasklog" id="toastLog"></div>
+  <div id="toastResult" style="margin-top:8px"></div>
+</div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+let STATE = null;          // last /api/state
+let tasks = {};            // taskId -> timer
+let currentChat = null;    // {username, before(cursor or null)}
+let browseMode = "sessions";
+let sessionCache = [];
+let contactCache = [];
+
+// --------------------------------------------------------------- helpers
+async function api(path, opts) {
+  const res = await fetch(path, opts);
+  const ct = res.headers.get("content-type") || "";
+  if (ct.includes("json")) return res.json();
+  return res;
+}
+function esc(s) { const d = document.createElement("div"); d.textContent = s == null ? "" : String(s); return d.innerHTML; }
+function fmtTime(epoch) {
+  if (!epoch) return "";
+  const d = new Date(epoch * 1000);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+function pill(label, cls) { const s = document.createElement("span"); s.className = "pill " + cls; s.textContent = label; return s; }
+function refreshPills() {
+  const box = $("pillbox"); box.innerHTML = "";
+  if (!STATE) return;
+  if (STATE.account) box.appendChild(pill(STATE.account.account_id, "ok"));
+  else box.appendChild(pill("未选账号", "bad"));
+  const k = STATE.key;
+  if (k && k.present) box.appendChild(pill(k.expired ? "密钥已过期(建议重取)" : "密钥 ✓", k.expired ? "warn" : "ok"));
+  else box.appendChild(pill("无密钥", "bad"));
+  const d = STATE.decrypted;
+  if (d && d.total > 0) box.appendChild(pill(`已解密 ${d.ready}/${d.total}`, d.ready === d.total ? "ok" : "warn"));
+}
+
+// -------------------------------------------------------------- navigation
+function goto(step) {
+  document.querySelectorAll(".screen").forEach(s => s.classList.remove("active"));
+  $("screen-" + step).classList.add("active");
+  document.querySelectorAll("#steps button").forEach(b => b.classList.toggle("active", +b.dataset.step === step));
+  if (step === 1) loadAccounts();
+  if (step === 3) loadDecryptStatus();
+  if (step === 4) { loadSessions(); }
+  if (step === 5) { const who = currentChat ? currentChat.display : ""; $("exportUser").value = who; }
+}
+document.querySelectorAll("#steps button").forEach(b => b.addEventListener("click", () => goto(+b.dataset.step)));
+
+function enableStep(n, on) { const b = document.querySelector(`#steps button[data-step="${n}"]`); if (b) b.disabled = !on; }
+function refreshStepGates() {
+  const hasAcct = !!(STATE && STATE.account);
+  const hasKey = hasAcct && STATE.key && STATE.key.present;
+  const ready = hasKey && STATE.decrypted && STATE.decrypted.total > 0 && STATE.decrypted.ready === STATE.decrypted.total;
+  enableStep(2, hasAcct); enableStep(3, hasKey); enableStep(4, ready); enableStep(5, ready);
+  // auto-advance visual affordance
+  if (hasAcct && !hasKey) document.querySelector('#steps button[data-step="2"]').textContent = "2 · 密钥 ⚠";
+}
+
+async function refreshState() {
+  try {
+    STATE = await api("/api/state");
+  } catch (e) { return; }
+  refreshPills(); refreshStepGates();
+  return STATE;
+}
+
+// ------------------------------------------------------------------ step 1
+async function scanRoot() {
+  const root = $("rootInput").value.trim();
+  const box = $("accountResults");
+  box.innerHTML = '<div class="hint">扫描中…</div>';
+  const data = await api("/api/accounts" + (root ? "?root=" + encodeURIComponent(root) : ""));
+  if (data.error) { box.innerHTML = `<div class="empty">${esc(data.error)}</div>`; return; }
+  box.innerHTML = "";
+  if (!data.roots.length) { box.innerHTML = '<div class="empty">未找到 xwechat_files 根目录。请手动输入路径或用「浏览选择…」。</div>'; return; }
+  for (const rootEntry of data.roots) {
+    const card = document.createElement("div"); card.className = "card";
+    const h = document.createElement("div"); h.style.cssText = "font-weight:600;font-size:14px;margin-bottom:8px";
+    h.textContent = rootEntry.root;
+    card.appendChild(h);
+    if (!rootEntry.accounts.length) { const e = document.createElement("div"); e.className = "hint"; e.textContent = "（该目录下未发现账号数据库）"; card.appendChild(e); }
+    rootEntry.accounts.forEach(a => {
+      const chip = document.createElement("div"); chip.className = "chip";
+      const sel = document.createElement("input"); sel.type = "radio"; sel.name = "acct";
+      const nm = document.createElement("span"); nm.className = "nm"; nm.textContent = a.account_id;
+      const btn = document.createElement("button"); btn.className = "btn primary"; btn.textContent = "选择";
+      btn.style.marginLeft = "auto";
+      btn.onclick = async () => {
+        const res = await api("/api/select-account", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ account_dir: a.account_dir }) });
+        if (res.error) { alert(res.error); return; }
+        await refreshState(); goto(2);
+      };
+      chip.append(sel, nm, btn);
+      card.appendChild(chip);
+    });
+    box.appendChild(card);
+  }
+}
+async function browseDir() {
+  const res = await api("/api/browse", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+  if (res.error) { alert("无法打开系统目录选择器：" + res.error); return; }
+  $("rootInput").value = res.path;
+  scanRoot();
+}
+
+// ------------------------------------------------------------------ step 2
+async function renderKeyCard() {
+  const card = $("keyCard"); card.innerHTML = "";
+  const k = STATE.key;
+  const me = document.createElement("div"); me.className = "rowline";
+  if (k && k.present) {
+    const t = document.createElement("div");
+    t.innerHTML = `<div style="font-size:14px">本机已保存密钥 <span class="mono">fp=${esc(k.fingerprint)}…</span></div>
+      <div class="hint">来源：${esc(k.source)} · 微信 ${esc(k.wechat_version || "?")} · 捕获于 ${fmtTime(k.captured_at)}
+      ${k.expired ? '<br><span style="color:#ffd479">已超过 24 小时，建议重新捕获以确保密钥仍有效</span>' : ""}</div>`;
+    me.appendChild(t);
+    const test = document.createElement("button"); test.className = "btn"; test.textContent = "校验";
+    test.onclick = async () => { test.textContent = "校验中…"; const s = await refreshState(); test.textContent = (s.key && s.key.present) ? "密钥在库 ✓" : "校验失败"; };
+    me.appendChild(test);
+  } else {
+    const t = document.createElement("div");
+    t.innerHTML = '<div style="font-size:14px">尚未为此账号保存密钥。</div><div class="hint">点击下方「自动获取」：ChatTrace 会先关闭微信进程，再以带登录态方式拉起微信并捕获内存密钥（约 1–2 分钟）。</div>';
+    me.appendChild(t);
+  }
+  card.appendChild(me);
+  const warn = document.createElement("div"); warn.className = "callout";
+  warn.innerHTML = '⚠️ <b>自动获取前</b>：请先正常打开并登录微信一次，然后<b>从系统托盘退出微信</b>（不是直接关窗口），保持本机已登录状态，随后点击：';
+  warn.style.cssText = "margin:12px 0;background:#33270f;border:1px solid #7a5c16;border-radius:10px;padding:10px 12px;font-size:13px;color:#ffdda8";
+  card.appendChild(warn);
+  const row = document.createElement("div"); row.className = "rowline";
+  const btn = document.createElement("button"); btn.className = "btn primary"; btn.textContent = k && k.present ? "重新获取密钥" : "🚀 自动获取密钥";
+  btn.onclick = () => {
+    if (!confirm("即将自动关闭并重新启动微信以捕获密钥。\n\n请确认：\n1) 微信已从托盘退出\n2) 本机之前登录过该账号（可自动登录）\n\n继续？")) return;
+    startTask("key-capture", "获取密钥", "/api/key/capture", { observe_ms: 150000 });
+  };
+  row.appendChild(btn);
+  card.appendChild(row);
+}
+async function tabManual(_, el) {
+  document.querySelectorAll("#screen-2 .tabs button").forEach(b => b.classList.toggle("active", b === el));
+}
+async function storeManualKey() {
+  const hex = $("manualHex").value.trim();
+  const out = $("manualResult");
+  out.innerHTML = '<div class="hint">校验中…</div>';
+  const res = await api("/api/key/manual", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ hex_password: hex }) });
+  if (res.error) { out.innerHTML = `<div style="color:#ff9daf;font-size:13px">✗ ${esc(res.error)}</div>`; return; }
+  out.innerHTML = `<div style="color:#9fe8bd;font-size:13px">✓ 密钥有效已保存（fp=${esc(res.fingerprint)}）</div>`;
+  $("manualHex").value = "";
+  await refreshState(); renderKeyCard();
+}
+
+// ------------------------------------------------------------------ task ui
+function showToast(title) {
+  $("toastTitle").textContent = title;
+  $("taskToast").style.display = "block";
+  $("toastLog").textContent = "";
+  $("toastResult").innerHTML = "";
+}
+function hideToast() { $("taskToast").style.display = "none"; }
+function logLine(text, cls) {
+  const div = document.createElement("div");
+  if (cls) div.className = cls;
+  div.textContent = text;
+  $("toastLog").appendChild(div);
+  $("toastLog").scrollTop = $("toastLog").scrollHeight;
+}
+function startTask(kind, title, path, body) {
+  showToast(title + "…");
+  logLine("正在启动…");
+  api(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body || {}) })
+    .then(res => {
+      if (res.error) { logLine("启动失败：" + res.error, "err"); return; }
+      pollTask(res.task_id, kind);
+    })
+    .catch(e => logLine("请求失败：" + e, "err"));
+}
+function pollTask(taskId, kind) {
+  if (tasks[taskId]) clearInterval(tasks[taskId]);
+  const lastLog = new Map();
+  const tick = async () => {
+    const t = await api("/api/tasks/" + taskId);
+    if (!t) { clearInterval(tasks[taskId]); delete tasks[taskId]; return; }
+    t.log.forEach((e, i) => {
+      if (lastLog.get(taskId) === i) return;
+      lastLog.set(taskId, i);
+      logLine("[" + e.t + "] " + e.msg, e.level === "error" ? "err" : (t.status === "done" ? "done" : ""));
+    });
+    if (t.status !== "running") {
+      clearInterval(tasks[taskId]); delete tasks[taskId];
+      $("toastTitle").textContent = (t.status === "done" ? "✓ " : "✗ ") + t.title + (t.status === "done" ? " 完成" : " 失败");
+      if (t.error) logLine(t.error, "err");
+      refreshState().then(() => {
+        if (kind === "decrypt" || kind === "key-capture") { renderKeyCard(); loadDecryptStatus(); if (kind === "decrypt") goto(4); }
+        if (kind === "export") renderExportResult(t.result);
+        if (kind === "key-capture" && t.status === "done") { goto(3); }
+      });
+    }
+  };
+  tick();
+  tasks[taskId] = setInterval(tick, 800);
+}
+
+// ------------------------------------------------------------------ step 3
+async function loadDecryptStatus() {
+  const data = await api("/api/decrypt-status");
+  const summary = $("decryptSummary");
+  const table = $("dbTable");
+  if (data.total === 0) { summary.textContent = data.error || "未选择账号或无数据库"; table.innerHTML = ""; return; }
+  summary.innerHTML = `共 <b>${data.total}</b> 个数据库，已解密 <b>${data.ready}</b>，待处理 <b>${data.total - data.ready}</b>`;
+  table.innerHTML = "";
+  data.dbs.forEach(d => {
+    const tr = document.createElement("tr");
+    const td1 = document.createElement("td"); td1.textContent = d.name;
+    const td2 = document.createElement("td"); td2.style.textAlign = "right";
+    const size = (d.size / 1e6).toFixed(1) + " MB";
+    td2.textContent = d.ready ? "✓ " + size : size;
+    td2.style.color = d.ready ? "#9fe8bd" : "#8b929c";
+    tr.append(td1, td2); table.appendChild(tr);
+  });
+}
+function startDecrypt(force) {
+  if (!STATE || !STATE.key || !STATE.key.present) { alert("请先在「密钥」步骤准备密钥"); goto(2); return; }
+  startTask("decrypt", force ? "强制重解密" : "解密 / 增量刷新", "/api/decrypt", { force: !!force });
+}
+
+// ------------------------------------------------------------------ step 4
+async function switchBrowse(mode, el) {
+  browseMode = mode;
+  document.querySelectorAll("#screen-4 .tabs button").forEach(b => b.classList.toggle("active", b === el));
+  if (mode === "sessions") { $("sessSearch").placeholder = "搜索会话 / 群名 / 摘要…"; await loadSessions(); }
+  else { $("sessSearch").placeholder = "搜索联系人昵称 / 备注 / 微信号…"; await loadContacts(); }
+}
+async function searchBrowse(ev) {
+  if (ev && ev.key && ev.key !== "Enter") return;
+  if (browseMode === "sessions") await loadSessions(); else await loadContacts();
+}
+async function loadSessions() {
+  const q = $("sessSearch").value.trim();
+  const data = await api("/api/sessions?limit=400" + (q ? "&q=" + encodeURIComponent(q) : ""));
+  if (data.error) { $("sessList").innerHTML = `<div class="empty">${esc(data.error)}</div>`; return; }
+  sessionCache = data.sessions;
+  renderSessionList();
+}
+function renderSessionList() {
+  const box = $("sessList"); box.innerHTML = "";
+  if (!sessionCache.length) { box.innerHTML = '<div class="empty">没有匹配的会话。</div>'; return; }
+  sessionCache.forEach(s => {
+    const b = document.createElement("button"); b.className = "sess";
+    if (currentChat && currentChat.username === s.username) b.classList.add("active");
+    const t1 = document.createElement("div"); t1.className = "t1";
+    const who = document.createElement("span"); who.className = "who"; who.textContent = s.display_name;
+    const when = document.createElement("span"); when.className = "when"; when.textContent = fmtTime(s.last_timestamp);
+    t1.append(who, when);
+    const t2 = document.createElement("div"); t2.className = "t2"; t2.textContent = (s.unread_count ? `[${s.unread_count} 未读] ` : "") + s.summary;
+    b.append(t1, t2);
+    b.onclick = () => openChat(s);
+    box.appendChild(b);
+  });
+}
+async function loadContacts() {
+  const q = $("sessSearch").value.trim();
+  const data = await api("/api/contacts?limit=200" + (q ? "&q=" + encodeURIComponent(q) : ""));
+  if (data.error) { $("sessList").innerHTML = `<div class="empty">${esc(data.error)}</div>`; return; }
+  contactCache = data.contacts;
+  const box = $("sessList"); box.innerHTML = "";
+  contactCache.forEach(c => {
+    const b = document.createElement("button"); b.className = "sess";
+    const t1 = document.createElement("div"); t1.className = "t1";
+    const who = document.createElement("span"); who.className = "who"; who.textContent = c.display_name;
+    const id = document.createElement("span"); id.className = "when mono"; id.textContent = c.username;
+    t1.append(who, id);
+    b.append(t1);
+    b.onclick = () => openChat({ username: c.username, display_name: c.display_name });
+    box.appendChild(b);
+  });
+}
+function openChat(session) {
+  currentChat = { username: session.username, display: session.display_name, before: null, loaded: 0 };
+  $("chatWho").textContent = session.display_name;
+  $("chatId").textContent = session.username;
+  $("chatBody").innerHTML = '<div class="empty">加载中…</div>';
+  $("exportUser").value = session.display_name;
+  document.querySelectorAll("#screen-4 .sess").forEach(x => x.classList.toggle("active", x.textContent.includes(session.username) || x.textContent.includes(session.display_name)));
+  fetchChat();
+}
+async function fetchChat(older = false) {
+  const c = currentChat; if (!c) return;
+  let url = `/api/chat/${encodeURIComponent(c.username)}?limit=200`;
+  if (older && c.before) url += "&before=" + c.before;
+  const data = await api(url);
+  if (data.error) { $("chatBody").innerHTML = `<div class="empty">${esc(data.error)}</div>`; return; }
+  if (older) { renderMessages(data.messages, true); } else { renderMessages(data.messages, false); }
+  c.loaded += data.messages.length;
+  $("chatId").textContent = `${c.username} · 共 ${data.total ?? "?"} 条 · 已显示 ${c.loaded}`;
+  if (!older && data.has_more) c.before = (data.messages[0] && data.messages[0].create_time) + "," + (data.messages[0] && data.messages[0].local_id);
+  const wrap = $("moreWrap"); wrap.innerHTML = "";
+  if (data.has_more) {
+    const btn = document.createElement("button"); btn.className = "btn"; btn.id = "moreBtn"; btn.textContent = "加载更早的消息 ↑";
+    btn.onclick = async () => {
+      // compute cursor from earliest loaded message
+      const rows = document.querySelectorAll("#chatBody .msg");
+      const first = rows[0]; if (!first) return;
+      const ct = first.dataset.ct, lid = first.dataset.lid;
+      if (!ct) return;
+      btn.textContent = "加载中…"; btn.disabled = true;
+      const data2 = await api(`/api/chat/${encodeURIComponent(c.username)}?limit=200&before=${ct},${lid}`);
+      if (data2.messages && data2.messages.length) { renderMessages(data2.messages, true); c.before = data2.has_more ? data2.messages[0].create_time + "," + data2.messages[0].local_id : null; }
+      if (!data2.has_more) { wrap.innerHTML = '<div class="hint">已到最早消息</div>'; return; }
+      btn.textContent = "加载更早的消息 ↑"; btn.disabled = false;
+    };
+    wrap.appendChild(btn);
+  }
+}
+function renderMessages(messages, prepend) {
+  const body = $("chatBody");
+  const frag = document.createDocumentFragment();
+  messages.forEach(m => {
+    const div = document.createElement("div");
+    div.className = "msg " + (m.is_outgoing ? "me" : "peer");
+    div.dataset.ct = m.create_time; div.dataset.lid = m.local_id;
+    const who = document.createElement("div"); who.className = "who";
+    who.textContent = m.is_outgoing ? "我" : m.sender;
+    const bubble = document.createElement("div"); bubble.className = "bubble";
+    if (m.display_type !== "text") {
+      const tag = document.createElement("span"); tag.className = "tag"; tag.textContent = "[" + m.display_type + "]";
+      bubble.appendChild(tag);
+    }
+    const text = document.createElement("span"); text.textContent = m.text;
+    bubble.appendChild(text);
+    if (m.links && m.links.length) {
+      const links = document.createElement("div"); links.className = "links";
+      m.links.forEach(l => { const a = document.createElement("a"); a.href = l; a.target = "_blank"; a.textContent = l; links.appendChild(a); });
+      bubble.appendChild(links);
+    }
+    const time = document.createElement("div"); time.className = "time"; time.textContent = fmtTime(m.create_time);
+    div.append(who, bubble, time);
+    frag.appendChild(div);
+  });
+  if (prepend) body.prepend(frag); else { body.innerHTML = ""; body.appendChild(frag); }
+  body.scrollTop = prepend ? frag.firstChild.offsetTop - 100 : body.scrollHeight;
+}
+function openExportTab() {
+  if (!currentChat) { alert("请先在「浏览聊天」选择一个会话"); goto(4); return; }
+  goto(5);
+}
+
+// ------------------------------------------------------------------ step 5
+async function startExport() {
+  if (!currentChat) { alert("没有选中的会话"); goto(4); return; }
+  startTask("export", "导出聊天", "/api/export", { username: currentChat.username, format: $("exportFmt").value });
+}
+function renderExportResult(result) {
+  const box = $("resultBox"); box.innerHTML = "";
+  if (!result) { box.innerHTML = '<div class="empty">导出失败</div>'; return; }
+  const d = document.createElement("div");
+  d.innerHTML = `<div style="margin:4px 0 10px">✓ 已导出 <b>${result.message_count}</b> 条消息（${esc(result.name)}）</div>`;
+  const row = document.createElement("div"); row.className = "rowline";
+  const dl = document.createElement("button"); dl.className = "btn primary"; dl.textContent = "下载文件";
+  dl.onclick = () => { window.location = "/api/download?name=" + encodeURIComponent(result.name); };
+  const open = document.createElement("button"); open.className = "btn"; open.textContent = "打开所在文件夹";
+  open.onclick = async () => { await api("/api/open-file", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: result.name }) }); };
+  const more = document.createElement("button"); more.className = "btn ghost"; more.textContent = "再导一份其他格式";
+  more.onclick = () => { const other = $("exportFmt").value; if (other === result.format) alert("换个格式（txt/json/html）再试"); else startExport(); };
+  row.append(dl, open, more);
+  d.appendChild(row);
+  box.appendChild(d);
+}
+
+// ------------------------------------------------------------------ boot
+(async function boot() {
+  await refreshState();
+  if (STATE && STATE.account) {
+    renderKeyCard();
+    if (STATE.key && STATE.key.present) {
+      // show decrypt step first if not ready
+      goto(STATE.decrypted.total && STATE.decrypted.ready === STATE.decrypted.total ? 4 : 3);
+      return;
+    }
+    goto(2);
+    return;
+  }
+  loadAccounts();
+})();
+$("exportFmt").value = "html";
+</script>
+</body>
+</html>
