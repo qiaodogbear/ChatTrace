@@ -66,6 +66,10 @@ chattrace export --account-dir "D:\...\xwechat_files\wxid_xxx" `
 `%LOCALAPPDATA%\ChatTrace\accounts\<wxid>\`（`decrypted/` 与 `exports/`）。
 密钥在 `%LOCALAPPDATA%\ChatTrace\keys\`（DPAPI 密文）。
 
-## 合规
+## 开源与合规
 
-仅用于导出**本人账号、本机**的聊天数据；不包含云端或共享能力。请勿用于他人账号或未授权数据。
+- 本项目基于 **Frida** 动态插桩方案；参考来源与格式原理见 [REFERENCES.md](REFERENCES.md)，
+  第三方依赖与各许可声明见 [NOTICE.md](NOTICE.md)。
+- 以 **MIT License** 开源（见 [LICENSE](LICENSE)）。
+- 仅用于导出**本人账号、本机**的聊天数据；非官方工具，与腾讯/微信无任何关联，
+  不包含微信专有代码，无云端或网络上报能力。请勿用于他人账号或未授权数据。
