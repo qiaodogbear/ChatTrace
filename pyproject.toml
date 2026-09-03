@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "chattrace"
+version = "0.1.0"
+description = "Local WeChat 4.x (4.1.11+) chat data toolchain: Frida KeyAgent + decrypt + export."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "ChatTrace Maintainers" }]
+keywords = ["wechat", "wcdb", "sqlcipher", "frida", "local-first", "windows"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Win32 (MS Windows)",
+  "Operating System :: Microsoft :: Windows",
+  "Programming Language :: Python :: 3",
+]
+dependencies = [
+  "frida>=16.0.0",
+  "pycryptodomex>=3.20",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+]
+
+[project.scripts]
+chattrace = "chattrace.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
