@@ -1,6 +1,15 @@
 # ChatTrace
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://python.org)
+[![Platform: Windows](https://img.shields.io/badge/Platform-Windows-0078D4.svg)](#快速开始开发环境windows--微信-4111)
+[![Frida](https://img.shields.io/badge/based_on-Frida-ec1c24.svg)](https://frida.re)
+[![GitHub](https://img.shields.io/badge/repo-qiaodogbear%2FChatTrace-181717?logo=github)](https://github.com/qiaodogbear/ChatTrace)
+
 完全本地的微信 4.x（4.1.11+）聊天数据工具链：自动取密钥 → 解密 → 浏览 → 导出。
+
+> 基于 **Frida** 动态插桩方案。参考来源见 [REFERENCES.md](REFERENCES.md)，
+> 第三方依赖与许可声明见 [NOTICE.md](NOTICE.md)。
 
 ## 能力（M1 + M2）
 
