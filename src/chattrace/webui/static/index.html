@@ -76,6 +76,14 @@ table.dbs td, table.dbs th { padding: 5px 8px; border-bottom: 1px solid #1e232b;
 .msg .who { font-size: 11px; color: #8b929c; margin: 2px 6px; }
 .msg .tag { color: #e8c76a; font-size: 11px; margin-right: 5px; }
 .msg .links { font-size: 12px; margin-top: 4px; }
+.msg .mediaWrap { margin-top: 6px; }
+.msg .mediaImg { display: block; max-width: 300px; max-height: 300px; border-radius: 8px; border: 1px solid #333c47; background:#0c0e11; }
+.msg .mediaImg.thumb { max-width: 150px; max-height: 150px; }
+.msg .voiceLink { display: inline-block; color: #7fd0a0; font-weight: 600; margin-top: 4px; text-decoration: none; }
+.msg .mediaNote { font-size: 11px; color: #8b929c; margin-top: 4px; }
+.msg .warn { display: inline-block; color: #ffd479; font-size: 12px; margin-top: 3px; }
+.check { color: #b7bdc6; font-size: 13px; display: flex; gap: 8px; align-items: flex-start; line-height: 1.5; }
+.check code { background: #1e242c; padding: 0 4px; border-radius: 4px; }
 .msg .time { font-size: 10px; color: #5d6570; margin: 2px 6px 0; }
 #moreBtn { align-self: center; margin: 8px 0; }
 #taskToast { position: fixed; right: 18px; bottom: 18px; width: 420px; max-width: 92vw; background: #161a20; border: 1px solid #2a323c; border-radius: 12px; padding: 12px; box-shadow: 0 8px 30px rgba(0,0,0,.5); display: none; z-index: 20; }
@@ -211,6 +219,11 @@ kbd { background: #1e242c; border: 1px solid #333c47; border-bottom-width: 2px; 
         </select>
         <button class="btn primary" onclick="startExport()">开始导出</button>
       </div>
+      <label class="check" style="margin-top:10px">
+        <input type="checkbox" id="exportMedia" checked>
+        包含媒体（图片 / 语音 .silk / 视频）。HTML 导出时媒体写入同目录 <code>xxx_assets</code> 文件夹并内嵌到页面；txt/json 仅附带状态说明。
+      </label>
+      <div class="hint" style="margin-top:6px">提示：新版（V2）加密图片与已被微信清理的原文件无法导出，会在页面中标注 ⚠️。</div>
       <div id="resultBox"></div>
     </div>
   </section>
@@ -547,12 +560,18 @@ function renderMessages(messages, prepend) {
     const who = document.createElement("div"); who.className = "who";
     who.textContent = m.is_outgoing ? "我" : m.sender;
     const bubble = document.createElement("div"); bubble.className = "bubble";
-    if (m.display_type !== "text") {
+    const hasOkMedia = m.media && m.media.status === "ok";
+    if (m.display_type !== "text" && !hasOkMedia) {
       const tag = document.createElement("span"); tag.className = "tag"; tag.textContent = "[" + m.display_type + "]";
       bubble.appendChild(tag);
     }
-    const text = document.createElement("span"); text.textContent = m.text;
-    bubble.appendChild(text);
+    // for ok media the placeholder text is replaced by the actual media element
+    const showText = !(m.media && (m.media.status === "ok" || (m.media.kind === "image" && m.media.status === "unsupported")));
+    if (showText) {
+      const text = document.createElement("span"); text.textContent = m.text;
+      bubble.appendChild(text);
+    }
+    appendMedia(bubble, m);
     if (m.links && m.links.length) {
       const links = document.createElement("div"); links.className = "links";
       m.links.forEach(l => { const a = document.createElement("a"); a.href = l; a.target = "_blank"; a.textContent = l; links.appendChild(a); });
@@ -565,6 +584,45 @@ function renderMessages(messages, prepend) {
   if (prepend) body.prepend(frag); else { body.innerHTML = ""; body.appendChild(frag); }
   body.scrollTop = prepend ? frag.firstChild.offsetTop - 100 : body.scrollHeight;
 }
+function appendMedia(bubble, m) {
+  if (!m.media) return;
+  const md = m.media;
+  if (md.status === "ok") {
+    if (md.kind === "image") {
+      const wrap = document.createElement("div"); wrap.className = "mediaWrap";
+      const a = document.createElement("a"); a.href = md.url; a.target = "_blank";
+      const img = document.createElement("img"); img.className = "mediaImg"; img.loading = "lazy"; img.alt = "图片";
+      img.onerror = () => { wrap.innerHTML = '<span class="warn">图片读取失败</span>'; };
+      img.src = md.url;
+      a.appendChild(img); wrap.appendChild(a); bubble.appendChild(wrap);
+    } else if (md.kind === "voice") {
+      const a = document.createElement("a"); a.className = "voiceLink"; a.href = md.url;
+      a.textContent = "🎤 语音（.silk 原始格式，点击下载" + (md.size ? " · " + Math.max(1, Math.round(md.size / 1024)) + " KB" : "") + "）";
+      bubble.appendChild(a);
+    } else if (md.kind === "video") {
+      if (md.is_thumbnail) {
+        const wrap = document.createElement("div"); wrap.className = "mediaWrap";
+        const img = document.createElement("img"); img.className = "mediaImg thumb"; img.loading = "lazy"; img.alt = "视频缩略图";
+        img.onerror = () => { wrap.innerHTML = ""; };
+        img.src = md.url;
+        wrap.appendChild(img);
+        bubble.appendChild(wrap);
+        const note = document.createElement("div"); note.className = "mediaNote"; note.textContent = "原视频已被微信清理，仅存缩略图（点图下载）";
+        bubble.appendChild(note);
+      } else {
+        const a = document.createElement("a"); a.className = "voiceLink"; a.href = md.url;
+        a.textContent = "🎬 视频（" + (md.detail || "") + "，点击下载）";
+        bubble.appendChild(a);
+      }
+    }
+    return;
+  }
+  if (md.status === "unsupported" || md.status === "missing" || md.status === "no-md5") {
+    const w = document.createElement("span"); w.className = "warn";
+    w.textContent = "⚠️ " + (md.detail || md.status);
+    bubble.appendChild(w);
+  }
+}
 function openExportTab() {
   if (!currentChat) { alert("请先在「浏览聊天」选择一个会话"); goto(4); return; }
   goto(5);
@@ -573,13 +631,22 @@ function openExportTab() {
 // ------------------------------------------------------------------ step 5
 async function startExport() {
   if (!currentChat) { alert("没有选中的会话"); goto(4); return; }
-  startTask("export", "导出聊天", "/api/export", { username: currentChat.username, format: $("exportFmt").value });
+  startTask("export", "导出聊天", "/api/export", {
+    username: currentChat.username,
+    format: $("exportFmt").value,
+    include_media: $("exportMedia").checked
+  });
 }
 function renderExportResult(result) {
   const box = $("resultBox"); box.innerHTML = "";
   if (!result) { box.innerHTML = '<div class="empty">导出失败</div>'; return; }
   const d = document.createElement("div");
   d.innerHTML = `<div style="margin:4px 0 10px">✓ 已导出 <b>${result.message_count}</b> 条消息（${esc(result.name)}）</div>`;
+  if (result.assets_name) {
+    const a = document.createElement("div"); a.className = "hint";
+    a.innerHTML = `媒体附件已写入同目录 <code>${esc(result.assets_name)}/</code>（图片/语音/视频）`;
+    d.appendChild(a);
+  }
   const row = document.createElement("div"); row.className = "rowline";
   const dl = document.createElement("button"); dl.className = "btn primary"; dl.textContent = "下载文件";
   dl.onclick = () => { window.location = "/api/download?name=" + encodeURIComponent(result.name); };

@@ -43,9 +43,10 @@ from ..keyagent import keystore
 from ..keyagent.account import Account, discover_accounts
 from ..models import KeyInfo
 from ..service import DecryptService
-from ..service.database import DatabaseService
+from ..service.database import DatabaseService, message_base_type
 from ..service.exporter import ChatExportService
 from ..service.keycapture import CaptureService
+from ..service.media import MediaService
 
 STATIC_DIR = Path(__file__).parent / "static"
 STATE_LOCK = threading.RLock()
@@ -205,6 +206,26 @@ def _db_for_account(account: Account) -> DatabaseService | None:
     return DatabaseService(account.account_id, out)
 
 
+_MEDIA_SVC_CACHE: dict[str, MediaService] = {}
+
+
+def _media_for_account(account: Account) -> MediaService | None:
+    db = _db_for_account(account)
+    if db is None:
+        return None
+    key = account.account_id
+    svc = _MEDIA_SVC_CACHE.get(key)
+    if svc is None or svc.decrypted_dir != config.account_decrypted_dir(key):
+        svc = MediaService(
+            account.account_id,
+            account.account_dir,
+            config.account_decrypted_dir(key),
+            account_work_dir(key) / "media_cache",
+        )
+        _MEDIA_SVC_CACHE[key] = svc
+    return svc
+
+
 # ------------------------------------------------------------------ request
 class ChatTraceHandler(BaseHTTPRequestHandler):
     server_version = "ChatTrace/0.1"
@@ -293,6 +314,8 @@ class ChatTraceHandler(BaseHTTPRequestHandler):
             return self.send_json(self._api_contacts(query))
         if method == "GET" and len(segments) == 2 and segments[0] == "chat":
             return self.send_json(self._api_chat(segments[1], query))
+        if method == "GET" and segments == ["media", "file"]:
+            return self._api_media_file(query)
         if method == "GET" and len(segments) == 2 and segments[0] == "tasks":
             task = TASKS.get(segments[1])
             if not task:
@@ -417,12 +440,124 @@ class ChatTraceHandler(BaseHTTPRequestHandler):
                 return {"error": "bad before cursor"}
         page = db.chat(username, limit=min(limit, 2000), before=before)
         total = db.count_messages(username)
+        media_svc = _media_for_account(account)
+        messages = []
+        for m in page.messages:
+            item = m.to_dict()
+            if media_svc is not None and m.display_type in ("image", "voice", "video"):
+                try:
+                    media_item = media_svc.item_for_message(db, username, m)
+                except Exception:
+                    media_item = None
+                if media_item is not None:
+                    if media_item.status == "ok":
+                        url = (
+                            f"/api/media/file?kind={media_item.kind}"
+                            f"&username={urllib.parse.quote(username)}"
+                            f"&local_id={m.local_id}&ct={m.create_time}"
+                        )
+                        item["media"] = {
+                            "kind": media_item.kind,
+                            "status": "ok",
+                            "url": url,
+                            "detail": media_item.detail,
+                            "size": media_item.size,
+                            "is_thumbnail": media_item.is_thumbnail,
+                        }
+                    else:
+                        item["media"] = {
+                            "kind": media_item.kind,
+                            "status": media_item.status,
+                            "detail": media_item.detail,
+                            "ref": media_item.ref,
+                        }
+            messages.append(item)
         return {
             "contact": page.contact.to_dict(),
-            "messages": [m.to_dict() for m in page.messages],
+            "messages": messages,
             "total": total,
             "has_more": page.has_more,
         }
+
+    def _api_media_file(self, query: dict) -> None:
+        """Serve one media payload (image bytes / .silk / video) for a message."""
+        account = self._require_account()
+        username = (query.get("username") or [""])[0]
+        local_id_s = (query.get("local_id") or [""])[0]
+        kind = (query.get("kind") or [""])[0]
+        ct_s = (query.get("ct") or [""])[0]
+        if not username or not local_id_s.isdigit():
+            return self.send_error_json("username and numeric local_id required")
+        db = _db_for_account(account)
+        if db is None:
+            return self.send_error_json("databases not decrypted yet", 409)
+        media_svc = _media_for_account(account)
+        if media_svc is None:
+            return self.send_error_json("media service unavailable", 409)
+        try:
+            create_time = int(ct_s) if ct_s.isdigit() else None
+        except ValueError:
+            create_time = None
+        raw = db.raw_message_by_id(username, int(local_id_s), create_time)
+        if raw is None:
+            return self.send_error_json("message not found", 404)
+        try:
+            item = media_svc.item_for_message(db, username, raw)
+        except Exception as exc:
+            return self.send_error_json(f"resolve failed: {exc}", 500)
+        if item.status != "ok" or item.kind != kind:
+            return self.send_error_json(f"media not available ({item.status})", 404)
+        try:
+            if kind == "image":
+                result = media_svc.decode_image(item)
+                if result is None:
+                    return self.send_error_json("decode failed", 404)
+                ext, blob = result
+                ctype = "image/jpeg" if ext == "jpg" else ("image/png" if ext == "png" else "image/gif")
+                return self._send(200, blob, ctype)
+            if kind == "voice":
+                blob = media_svc.voice_blob(username, int(local_id_s), int(raw["create_time"]))
+                if blob is None:
+                    return self.send_error_json("voice payload missing", 404)
+                name = f"voice_{local_id_s}.silk"
+                return self._send_bytes_attachment(200, blob, "audio/x-silk", name)
+            if kind == "video":
+                if item.disk_path is None or not item.disk_path.is_file():
+                    return self.send_error_json("video file missing", 404)
+                ctype = mimetypes.guess_type(item.disk_path.name)[0] or "application/octet-stream"
+                return self._send_file_stream(item.disk_path, ctype)
+        except Exception as exc:
+            return self.send_error_json(f"media read failed: {exc}", 500)
+        return self.send_error_json("unsupported media kind", 400)
+
+    def _send_bytes_attachment(self, code: int, body: bytes, content_type: str, name: str) -> None:
+        self.send_response(code)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Disposition", f'attachment; filename="{urllib.parse.quote(name)}"')
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def _send_file_stream(self, path: Path, content_type: str, chunk: int = 64 * 1024) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(path.stat().st_size))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Disposition", f'attachment; filename="{urllib.parse.quote(path.name)}"')
+        self.end_headers()
+        try:
+            with open(path, "rb") as fh:
+                while True:
+                    data = fh.read(chunk)
+                    if not data:
+                        break
+                    self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
     def _api_download(self, query: dict) -> None:
         account = current_account()
@@ -555,6 +690,7 @@ class ChatTraceHandler(BaseHTTPRequestHandler):
         account = self._require_account()
         username = (body.get("username") or "").strip()
         fmt = (body.get("format") or "txt").strip().lower()
+        include_media = bool(body.get("include_media"))
         if not username:
             return {"error": "missing username"}
         if fmt not in ("txt", "json", "html"):
@@ -563,21 +699,34 @@ class ChatTraceHandler(BaseHTTPRequestHandler):
         def run(task: Task) -> dict:
             db = DatabaseService(account.account_id, config.account_decrypted_dir(account.account_id))
             total = db.count_messages(username) or 0
-            task.add_log(f"开始导出 {username} · {fmt}（约 {total} 条）")
+            media_svc = None
+            if include_media:
+                media_svc = _media_for_account(account)
+            task.add_log(f"开始导出 {username} · {fmt}（约 {total} 条，媒体{'开' if include_media else '关'}）")
             exporter = ChatExportService(db, account_exports_dir(account.account_id))
             outcome = exporter.export(
                 username,
                 fmt,
                 progress=lambda done, _t: task.add_log(f"…{done}/{total}") if done % 2000 == 0 else None,
+                include_media=include_media,
+                media=media_svc,
             )
-            task.add_log(f"完成：{outcome.message_count} 条 -> {outcome.output_path.name}")
-            return {
+            payload = {
                 "path": str(outcome.output_path),
                 "name": outcome.output_path.name,
                 "message_count": outcome.message_count,
                 "format": fmt,
                 "display_name": outcome.display_name,
             }
+            if include_media and fmt == "html":
+                assets = outcome.output_path.parent / (outcome.output_path.stem + "_assets")
+                if assets.is_dir():
+                    payload["assets_dir"] = str(assets)
+                    payload["assets_name"] = assets.name
+                    task.add_log(f"完成：{outcome.message_count} 条 -> {outcome.output_path.name}（含媒体目录 {assets.name}/）")
+                    return payload
+            task.add_log(f"完成：{outcome.message_count} 条 -> {outcome.output_path.name}")
+            return payload
 
         task_id = TASKS.start("export", f"导出 · {fmt}", run)
         return {"task_id": task_id}

@@ -6,7 +6,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from . import __version__
+from . import __version__, config
 from .config import (
     ERR_OK,
     KeyagentError,
@@ -95,6 +95,9 @@ def build_parser() -> argparse.ArgumentParser:
     exp.add_argument("--query", default="", help="Resolve chat by name/username substring.")
     exp.add_argument("--format", choices=("txt", "json", "html"), default="txt")
     exp.add_argument("--out", default=None, help="Output file (default: <exports>/<stamp>__<name>.<fmt>).")
+    exp.add_argument("--media", action="store_true",
+                     help="Include media: HTML writes an <xxx>_assets folder with images/voices/videos; "
+                          "txt/json annotate each media message with availability.")
 
     web = sub.add_parser("webui", help="Launch the guided Web UI (opens the browser).")
     web.add_argument("--host", default="127.0.0.1")
@@ -473,18 +476,32 @@ def cmd_export(args) -> int:
     display = contact.display_name if contact else username
     print(f"exporting {display} ({username}) -> {args.format} ...")
     total = db.count_messages(username) or 0
+    media_svc = None
+    if args.media:
+        from .service.media import MediaService
+
+        dec_root = _decrypted_root(account.account_id, None)
+        media_svc = MediaService(
+            account.account_id, account.account_dir, dec_root,
+            config.account_work_dir(account.account_id) / "media_cache",
+        )
 
     def progress(done: int, _total: int | None) -> None:
         print(f"\r  {done}/{total}", end="", flush=True)
 
     try:
         outcome = ChatExportService(db, account_exports_dir(account.account_id)).export(
-            username, args.format, progress=progress, output_path=Path(args.out) if args.out else None
+            username, args.format, progress=progress, output_path=Path(args.out) if args.out else None,
+            include_media=args.media, media=media_svc,
         )
     except Exception as exc:
         raise KeyagentError(10, f"export failed: {exc}") from exc
     print()
     print(f"exported {outcome.message_count} messages -> {outcome.output_path}")
+    if args.media and args.format == "html":
+        assets = outcome.output_path.parent / (outcome.output_path.stem + "_assets")
+        if assets.is_dir():
+            print(f"media assets   -> {assets}/")
     return ERR_OK
 
 

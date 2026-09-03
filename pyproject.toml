@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "chattrace"
-version = "0.2.0"
-description = "Local WeChat 4.x (4.1.11+) chat toolchain: KeyAgent capture, guided Web UI, decrypt, browse, txt/json/html export."
+version = "0.3.0"
+description = "Local WeChat 4.x (4.1.11+) chat toolchain: KeyAgent capture, guided Web UI, decrypt, browse, media + txt/json/html export."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"

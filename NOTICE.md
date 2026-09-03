@@ -25,6 +25,11 @@ ChatTrace 以 **MIT License** 开源（见 [LICENSE](LICENSE)）。本仓库自�
 | **wechat-chatlog-studio**（mordekasiser）—— 本地微信桌面聊天浏览/导出工具 | 账号目录布局、contact/SessionTable/Msg_<md5> 查询语义、消息类型渲染思路参考 | MIT |
 | **SQLCipher** (Zetetic) | 数据库加密格式原理（PBKDF2 派生、页级 AES、reserve 布局）依据其公开格式说明理解 | BSD 风格 |
 | **Frida** 官方文档与示例 | KeyAgent 注入与脚本基础设施 | LGPL-2.1 / Apache-2.0 (docs) |
+| **WeChatDaily**（Bryan-Cyf） | M3 媒体：SILK 语音链路与 macOS 图片 key 思路的**格式确认**（macOS 公式不适用于 Windows，代码未采用） | MIT |
+| **xlight/chatlog** | M3 媒体：4.x 图片容器三态与"视频明文"的行为佐证 | Apache-2.0 |
+
+> M3 图片 dat 解密（单字节 XOR 反推等）由 ChatTrace 依据文件头与
+> JPEG/PNG/GIF 魔数**独立推导并在真实数据上验证**，未包含上述参考项目代码。
 
 ## 法律与合规提醒
 
@@ -35,5 +40,7 @@ ChatTrace 以 **MIT License** 开源（见 [LICENSE](LICENSE)）。本仓库自�
   微信专有代码或资源，仅在本机对自有数据进行格式互操作。
 - 数据与密钥均保存在本机（`%LOCALAPPDATA%\ChatTrace\`）；项目不提供任何云端或
   网络同步能力，无遥测、无联网上报。
+- 逆向研究存在平台条款与法律风险（社区已出现因腾讯函件要求删库的先例）。本项目
+  仅用于个人数据归档与研究；请自行评估风险并遵守适用法律。
 
 > 若您是某参考项目的作者并认为致谢或引用不准确，欢迎通过 GitHub Issue 指出。

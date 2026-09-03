@@ -189,6 +189,7 @@ class MessageView:
     display_type: str      # text|image|voice|video|emoji|link|other
     links: tuple[str, ...] = ()
     raw_content: str = ""
+    packed_info_data: object = None   # used by MediaService; not serialized
 
     def to_dict(self) -> dict:
         return {
@@ -501,6 +502,36 @@ class DatabaseService:
                 con.close()
         return total
 
+    def raw_message_by_id(self, username: str, local_id: int, create_time: int | None = None) -> dict | None:
+        """One raw row dict (union columns) for a single (local_id[, create_time]).
+
+        local_id is only unique within one shard, so callers that paginate across
+        shards (the chat view) should also pass create_time to pick the same row
+        that the merged view would keep.
+        """
+        table = self.message_table_name(username)
+        for db in self._shards_with_table(table):
+            con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+            try:
+                cols = self._cols(con, table)
+                if not set(self._MSG_WANT).issubset(cols):
+                    continue
+                usable = list(self._MSG_WANT) + [c for c in self._MSG_OPTIONAL if c in cols]
+                select = ", ".join(f"[{c}]" for c in usable)
+                where = "local_id = ?"
+                params: list = [int(local_id)]
+                if create_time is not None:
+                    where += " AND create_time = ?"
+                    params.append(int(create_time))
+                row = con.execute(
+                    f"SELECT {select} FROM [{table}] WHERE {where} LIMIT 1", params
+                ).fetchone()
+            finally:
+                con.close()
+            if row:
+                return dict(zip(usable, row))
+        return None
+
     def iter_chat_all(self, username: str) -> Iterator[MessageView]:
         """All messages oldest-first (used by exporters)."""
         cursor: tuple[int, int] | None = None
@@ -563,6 +594,7 @@ def _build_views(db: DatabaseService, username: str, rows: list[dict]) -> list[M
                 display_type=TYPE_LABEL.get(base_type, "other"),
                 links=_extract_links(raw.get("message_content"), raw.get("compress_content"), raw.get("packed_info_data")),
                 raw_content=str(raw.get("message_content") or ""),
+                packed_info_data=raw.get("packed_info_data"),
             )
         )
     return views
