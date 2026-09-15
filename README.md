@@ -384,7 +384,7 @@ tests/                   # 106 个用例：解密往返、跨分片发送者、�
 | 文档 | 内容 |
 | --- | --- |
 | [新手图文指南](docs/beginner_guide.md) | 五步上手（带截图）、FAQ、错误码对照表、清理方式 |
-| [媒体格式与解密笔记](docs/media-format-notes.md) | 图片 dat 三态、语音存放位置、消息↔文件关联方式与跨分片陷阱 |
+| [媒体格式与解密笔记](docs/media-format-notes.md) | 图片 dat 三态与 V2 密钥离线派生、语音存放位置、消息↔文件关联方式与跨分片陷阱 |
 | [NOTICE.md](NOTICE.md) / [REFERENCES.md](REFERENCES.md) | 第三方许可、参考来源、合规边界 |
 | [发布说明](https://github.com/qiaodogbear/ChatTrace/releases) | 各版本的新增能力与已知限制 |
 
