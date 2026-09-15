@@ -277,7 +277,7 @@ function goto(step) {
   document.querySelectorAll(".screen").forEach(s => s.classList.remove("active"));
   $("screen-" + step).classList.add("active");
   document.querySelectorAll("#steps button").forEach(b => b.classList.toggle("active", +b.dataset.step === step));
-  if (step === 1) loadAccounts();
+  if (step === 1) scanRoot();
   if (step === 3) loadDecryptStatus();
   if (step === 4) { loadSessions(); }
   if (step === 5) { const who = currentChat ? currentChat.display : ""; $("exportUser").value = who; }
@@ -672,7 +672,7 @@ function renderExportResult(result) {
     goto(2);
     return;
   }
-  loadAccounts();
+  scanRoot();
 })();
 $("exportFmt").value = "html";
 </script>
