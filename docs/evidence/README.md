@@ -25,3 +25,7 @@
 
 `wx_password.bin`（32B 主密钥）与 `wx_hits.jsonl`（含内存 dump 候选）**不归档入库**，
 按用户要求保留于 `%TEMP%`，由用户自行管理。任何提交不得包含此类文件。
+
+> 同理，脚本中的**账号目录与微信安装路径已替换为占位符**（可用 `CHATTRACE_ACCOUNT`、
+> `CHATTRACE_WECHAT_ROOT`、`CHATTRACE_WEIXIN_EXE`、`CHATTRACE_MSG0_DB` 环境变量覆盖）。
+> 这些脚本是当日实测的原样留档，运行前请按本机情况设置环境变量。
