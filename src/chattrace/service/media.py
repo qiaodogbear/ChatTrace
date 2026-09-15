@@ -27,12 +27,13 @@ import hashlib
 import re
 import sqlite3
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Iterator
 
 from .database import DatabaseService, message_base_type
+from .payload import parse_payload
 
 V1_MAGIC = bytes.fromhex("070856310807")
 V2_MAGIC = bytes.fromhex("070856320807")
@@ -304,6 +305,30 @@ class MediaService:
         blob = self._voice_row(username, local_id, create_time)
         return bytes(blob) if blob else None
 
+    def voice_wav(self, username: str, local_id: int, create_time: int = 0) -> bytes | None:
+        """Decode the voice for in-UI playback, caching the WAV next to other media.
+
+        Returns ``None`` when the payload is missing (WeChat cleaned it up) or no
+        SILK decoder is installed — callers then render a placeholder instead.
+        """
+        from . import voice as voice_mod
+
+        chat_key = hashlib.md5(username.encode("utf-8")).hexdigest()
+        cached = voice_mod.cached_wav_path(self.cache_dir, chat_key, int(local_id))
+        if cached.is_file() and cached.stat().st_size > 44:
+            return cached.read_bytes()
+        blob = self.voice_blob(username, local_id, create_time)
+        if not blob:
+            return None
+        wav = voice_mod.silk_to_wav(blob)
+        if wav is None:
+            return None
+        try:
+            voice_mod.write_cached_wav(cached, wav)
+        except OSError:
+            pass
+        return wav
+
     # -------------------------------------------------------------- video
     def video_file(self, username: str, md5: str, create_time: int) -> tuple[Path | None, Path | None]:
         """(mp4, thumb) plaintext under msg/video/<yyyy-MM>/."""
@@ -357,13 +382,19 @@ class MediaService:
 
     # --------------------------------------------------------- message-level
     def item_for_message(self, db: DatabaseService, username: str, msg) -> MediaItem:
-        """Resolve a rendered MessageView (or dict with the same keys)."""
+        """Resolve a rendered MessageView (or dict with the same keys).
+
+        Message-declared metadata (size, dimensions, duration from the message XML)
+        is used to enrich the item so the UI can render informative cards even when
+        the payload itself is missing or encrypted.
+        """
+        meta: dict = {}
         if hasattr(msg, "base_type"):
             base_type = int(msg.base_type)
             local_id = int(msg.local_id)
             create_time = int(msg.create_time)
-            local_type = int(msg.local_type)
             packed = getattr(msg, "packed_info_data", None)
+            meta = getattr(msg, "media", None) or {}
             if packed is None:
                 packed = _packed_from_raw(db, username, local_id)
         else:
@@ -371,15 +402,23 @@ class MediaService:
             local_id = int(msg.get("local_id", 0))
             create_time = int(msg.get("create_time", 0))
             packed = msg.get("packed_info_data")
-            local_type = int(msg.get("local_type", 0))
+            meta = msg.get("media") or {}
+            if not meta:  # raw row (API path): decode the payload for its metadata
+                try:
+                    parsed = parse_payload(int(msg.get("local_type", 0)), msg.get("message_content"), msg.get("source"))
+                    meta = parsed.meta.to_dict() if parsed.meta else {}
+                except Exception:
+                    meta = {}
         md5 = md5_hex32(packed)
         if base_type == 3:
-            return self.image_item(username, md5 or "", create_time)
-        if base_type in (34, 50):
-            return self.voice_item(username, local_id, create_time)
-        if base_type == 43:
-            return self.video_item(username, md5 or "", create_time)
-        return MediaItem(kind="other", status="skipped", ref="", detail="该消息类型不包含可导出媒体")
+            item = self.image_item(username, md5 or "", create_time)
+        elif base_type in (34, 50):
+            item = self.voice_item(username, local_id, create_time)
+        elif base_type == 43:
+            item = self.video_item(username, md5 or "", create_time)
+        else:
+            return MediaItem(kind="other", status="skipped", ref="", detail="该消息类型不包含可导出媒体")
+        return _enrich(item, meta)
 
     def decode_image(self, item: MediaItem) -> tuple[str, bytes] | None:
         """Decode an ok image_item to (ext, image bytes); raises on corrupt."""
@@ -409,3 +448,61 @@ def _packed_from_raw(db: DatabaseService, username: str, local_id: int):
         if row and row[0] is not None:
             return row[0]
     return None
+
+
+def _fmt_size(size: int) -> str:
+    if size <= 0:
+        return ""
+    if size < 1024:
+        return f"{size} B"
+    if size < 1024 * 1024:
+        return f"{size / 1024:.1f} KB"
+    return f"{size / 1024 / 1024:.1f} MB"
+
+
+def _fmt_duration(ms: int) -> str:
+    if ms <= 0:
+        return ""
+    seconds = round(ms / 1000)
+    if seconds < 60:
+        return f"{seconds}″"
+    return f"{seconds // 60}′{seconds % 60:02d}″"
+
+
+def _enrich(item: MediaItem, meta: dict) -> MediaItem:
+    """Fold message-XML metadata into the human-readable detail line."""
+    if not meta:
+        return item
+    duration = int(meta.get("duration_ms") or 0)
+    length = int(meta.get("length") or 0)
+    width = int(meta.get("width") or 0)
+    height = int(meta.get("height") or 0)
+    dims = f"{width}×{height}" if width and height else ""
+    size = _fmt_size(length)
+    label = _fmt_duration(duration)
+    detail = item.detail
+
+    if item.kind == "voice":
+        if item.status == "ok":
+            detail = f"语音 {label} · 点击播放" if label else "语音 · 点击播放"
+        elif item.status == "missing":
+            detail = f"语音 {label}（本机缓存已过期，无法播放）" if label else "语音缓存已过期"
+    elif item.kind == "image":
+        extra = " · ".join(x for x in (dims, size) if x)
+        if item.status == "unsupported":
+            detail = f"{extra} · 新版加密格式，离线无法解密" if extra else item.detail
+        elif item.status == "missing":
+            detail = f"{extra}（原文件已被微信清理）" if extra else item.detail
+        elif item.status == "ok" and extra:
+            detail = extra
+    elif item.kind == "video":
+        extra = " · ".join(x for x in (label, size, dims) if x)
+        if item.status == "ok" and not item.is_thumbnail:
+            detail = f"视频 {label} · {size}" if label and size else (item.detail or extra)
+        elif item.is_thumbnail:
+            detail = f"仅剩缩略图 · {extra}" if extra else item.detail
+        elif item.status == "missing":
+            detail = f"视频 {label}（原文件已被微信清理）" if label else item.detail
+    if detail and detail != item.detail:
+        return replace(item, detail=detail)
+    return item

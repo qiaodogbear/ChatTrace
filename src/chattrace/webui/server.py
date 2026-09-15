@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import os
+import re
 import subprocess
 import tempfile
 import threading
@@ -43,6 +44,7 @@ from ..keyagent import keystore
 from ..keyagent.account import Account, discover_accounts
 from ..models import KeyInfo
 from ..service import DecryptService
+from ..service import voice as voice_service
 from ..service.database import DatabaseService, message_base_type
 from ..service.exporter import ChatExportService
 from ..service.keycapture import CaptureService
@@ -367,6 +369,9 @@ class ChatTraceHandler(BaseHTTPRequestHandler):
             "decrypted": decrypt,
             "counts": counts,
             "app_dir": str(config.app_data_dir()),
+            "capabilities": {
+                "voice_playback": voice_service.decoder_available(),
+            },
         }
 
     def _api_accounts(self, query: dict) -> dict:
@@ -441,36 +446,41 @@ class ChatTraceHandler(BaseHTTPRequestHandler):
         page = db.chat(username, limit=min(limit, 2000), before=before)
         total = db.count_messages(username)
         media_svc = _media_for_account(account)
+        can_play_voice = voice_service.decoder_available()
         messages = []
         for m in page.messages:
             item = m.to_dict()
-            if media_svc is not None and m.display_type in ("image", "voice", "video"):
+            if media_svc is not None and m.kind in ("image", "voice", "video"):
                 try:
                     media_item = media_svc.item_for_message(db, username, m)
                 except Exception:
                     media_item = None
                 if media_item is not None:
+                    payload = {
+                        "kind": media_item.kind,
+                        "status": media_item.status,
+                        "detail": media_item.detail,
+                        "size": media_item.size,
+                        "is_thumbnail": media_item.is_thumbnail,
+                    }
+                    url = None
                     if media_item.status == "ok":
-                        url = (
-                            f"/api/media/file?kind={media_item.kind}"
-                            f"&username={urllib.parse.quote(username)}"
-                            f"&local_id={m.local_id}&ct={m.create_time}"
-                        )
-                        item["media"] = {
-                            "kind": media_item.kind,
-                            "status": "ok",
-                            "url": url,
-                            "detail": media_item.detail,
-                            "size": media_item.size,
-                            "is_thumbnail": media_item.is_thumbnail,
-                        }
-                    else:
-                        item["media"] = {
-                            "kind": media_item.kind,
-                            "status": media_item.status,
-                            "detail": media_item.detail,
-                            "ref": media_item.ref,
-                        }
+                        if media_item.kind == "voice":
+                            if can_play_voice:
+                                url = (
+                                    f"/api/media/file?kind=voice"
+                                    f"&username={urllib.parse.quote(username)}"
+                                    f"&local_id={m.local_id}&ct={m.create_time}"
+                                )
+                        else:
+                            url = (
+                                f"/api/media/file?kind={media_item.kind}"
+                                f"&username={urllib.parse.quote(username)}"
+                                f"&local_id={m.local_id}&ct={m.create_time}"
+                            )
+                    if url:
+                        payload["url"] = url
+                    item["media"] = payload
             messages.append(item)
         return {
             "contact": page.contact.to_dict(),
@@ -516,11 +526,13 @@ class ChatTraceHandler(BaseHTTPRequestHandler):
                 ctype = "image/jpeg" if ext == "jpg" else ("image/png" if ext == "png" else "image/gif")
                 return self._send(200, blob, ctype)
             if kind == "voice":
-                blob = media_svc.voice_blob(username, int(local_id_s), int(raw["create_time"]))
-                if blob is None:
-                    return self.send_error_json("voice payload missing", 404)
-                name = f"voice_{local_id_s}.silk"
-                return self._send_bytes_attachment(200, blob, "audio/x-silk", name)
+                # decoded WAV powers the inline <audio> player in the UI
+                wav = media_svc.voice_wav(username, int(local_id_s), int(raw["create_time"]))
+                if wav is None:
+                    return self.send_error_json(
+                        "voice cannot be played (missing payload or no SILK decoder)", 404
+                    )
+                return self._send_audio(wav)
             if kind == "video":
                 if item.disk_path is None or not item.disk_path.is_file():
                     return self.send_error_json("video file missing", 404)
@@ -529,6 +541,36 @@ class ChatTraceHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             return self.send_error_json(f"media read failed: {exc}", 500)
         return self.send_error_json("unsupported media kind", 400)
+
+    def _send_audio(self, wav: bytes) -> None:
+        """Serve a decoded voice WAV inline, honouring a simple Range request."""
+        start, end = 0, len(wav) - 1
+        range_header = self.headers.get("Range") or ""
+        match = re.match(r"bytes=(\d*)-(\d*)$", range_header.strip())
+        if match and (match.group(1) or match.group(2)):
+            if match.group(1):
+                start = int(match.group(1))
+                if match.group(2):
+                    end = int(match.group(2))
+            else:  # suffix range: last N bytes
+                start = max(0, len(wav) - int(match.group(2)))
+            start = max(0, min(start, len(wav) - 1))
+            end = max(start, min(end, len(wav) - 1))
+            body = wav[start:end + 1]
+            self.send_response(206)
+            self.send_header("Content-Range", f"bytes {start}-{end}/{len(wav)}")
+        else:
+            body = wav
+            self.send_response(200)
+        self.send_header("Content-Type", "audio/wav")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Cache-Control", "private, max-age=3600")
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
     def _send_bytes_attachment(self, code: int, body: bytes, content_type: str, name: str) -> None:
         self.send_response(code)

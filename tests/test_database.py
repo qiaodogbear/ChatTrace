@@ -96,8 +96,9 @@ def test_chat_direction_and_render(tree: Path) -> None:
     assert by_id[1].is_outgoing is False and by_id[1].sender == "老鲍勃"
     assert by_id[1].text == "你好，在吗？" and by_id[1].display_type == "text"
     assert by_id[2].is_outgoing is True and by_id[2].sender != "老鲍勃"
-    assert by_id[3].display_type == "image" and by_id[3].text == "图片"
-    assert by_id[4].display_type == "voice" and by_id[4].text == "语音"
+    # rich messages render through the payload parser: "[图片]" / "[语音]" style labels
+    assert by_id[3].display_type == "image" and by_id[3].kind == "image" and by_id[3].text == "[图片]"
+    assert by_id[4].display_type == "voice" and by_id[4].kind == "voice" and by_id[4].text == "[语音]"
 
     # account-username inference: account dir name starts with wxid_alice_
     assert db.account_username(CONTACT_USER) == "wxid_alice"

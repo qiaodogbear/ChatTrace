@@ -1,9 +1,16 @@
-"""M2 DatabaseService: read-only query layer over a decrypted db_storage tree.
+"""DatabaseService: read-only query layer over a decrypted db_storage tree.
 
 Mirrors the WeChat 4.x layout:
   contact.db    -> contact(username, remark, nick_name, alias, delete_flag, …)
   session.db    -> SessionTable(username, summary, last_timestamp, unread_count, …)
   message/*.db  -> Msg_<md5(username)> tables + Name2Id(rowid, user_name)
+
+Two WeChat 4.x quirks are handled explicitly (see also service/payload.py):
+  * message bodies are Zstandard-compressed in most rows (WCDB_CT_*=4), so the raw
+    column bytes must be decompressed before any text rendering;
+  * Name2Id rowids are **per shard**: the same rowid means different people in
+    different message_*.db files, so senders are resolved against the Name2Id of
+    the shard the row came from (never from a merged map).
 
 All queries are defensive: every SQL statement adapts to the columns actually present
 in the file (message shards can differ across versions), and tables that do not exist
@@ -17,7 +24,9 @@ import sqlite3
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Iterable, Iterator
+from typing import Any, Callable, Iterable, Iterator
+
+from .payload import ParsedMessage, parse_payload
 
 _CONTACT_DB_REL = Path("contact") / "contact.db"
 _SESSION_DB_REL = Path("session") / "session.db"
@@ -190,6 +199,9 @@ class MessageView:
     links: tuple[str, ...] = ()
     raw_content: str = ""
     packed_info_data: object = None   # used by MediaService; not serialized
+    sender_wxid: str = ""             # resolved sender username (empty when unknown)
+    kind: str = "text"                # text|image|voice|video|emoji|location|call|card|file|link|quote|system|other
+    media: dict = field(default_factory=dict)   # metadata extracted from the message XML
 
     def to_dict(self) -> dict:
         return {
@@ -199,8 +211,11 @@ class MessageView:
             "create_time": self.create_time,
             "is_outgoing": self.is_outgoing,
             "sender": self.sender,
+            "sender_wxid": self.sender_wxid,
             "text": self.text,
             "display_type": self.display_type,
+            "kind": self.kind,
+            "meta": self.media or None,
             "links": list(self.links),
         }
 
@@ -226,6 +241,7 @@ class DatabaseService:
             raise DatabaseError(f"decrypted dir missing: {self.decrypted_dir} (run `data decrypt` first)")
         self._contacts: dict[str, ContactView] | None = None
         self._sender_map: dict[int, str] | None = None
+        self._shard_sender_maps: dict[Path, dict[int, str]] = {}
         self._shard_cache: dict[str, list[Path]] = {}
 
     # ------------------------------------------------------------ connection
@@ -238,12 +254,25 @@ class DatabaseService:
         return con
 
     @staticmethod
+    def _connect_raw(db: Path):
+        """Connection that yields **bytes** for TEXT columns.
+
+        Message payloads are zstd blobs stored in TEXT columns; decoding them as
+        UTF-8 first (the default text_factory) irreversibly corrupts the data, so
+        message reads always go through this raw connection.
+        """
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        con.text_factory = bytes
+        return con
+
+    @staticmethod
     def _cols(con, table: str) -> set[str]:
         try:
             rows = con.execute(f"PRAGMA table_info([{table}])").fetchall()
         except sqlite3.Error:
             return set()
-        return {str(row[1]) for row in rows}
+        # raw connections hand back bytes for TEXT columns, so normalise here
+        return {_as_text(row[1]) for row in rows}
 
     @staticmethod
     def _has_table(con, table: str) -> bool:
@@ -375,24 +404,45 @@ class DatabaseService:
         return hits
 
     def sender_name_map(self) -> dict[int, str]:
-        """rowid -> username from Name2Id, merged across message shards."""
+        """rowid -> username from Name2Id, merged across shards (legacy helper).
+
+        NOTE: rowids are per-shard, so this merged map is only safe for tasks that
+        do not resolve a specific message's sender (e.g. guessing the account's own
+        username).  Message rendering uses :meth:`sender_name_map_for_shard`.
+        """
         if self._sender_map is not None:
             return self._sender_map
         mapping: dict[int, str] = {}
         for db in self._message_shard_dbs():
-            con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-            try:
-                if not self._has_table(con, "Name2Id"):
-                    continue
-                cols = self._cols(con, "Name2Id")
-                if "user_name" not in cols:
-                    continue
-                rows = con.execute("SELECT rowid, user_name FROM Name2Id").fetchall()
-            finally:
-                con.close()
-            for rowid, user_name in rows:
-                mapping[int(rowid)] = str(user_name)
+            mapping.update(self.sender_name_map_for_shard(db))
         self._sender_map = mapping
+        return mapping
+
+    def sender_name_map_for_shard(self, shard: Path) -> dict[int, str]:
+        """rowid -> username using **this shard's** Name2Id table."""
+        shard = Path(shard)
+        cached = self._shard_sender_maps.get(shard)
+        if cached is not None:
+            return cached
+        mapping: dict[int, str] = {}
+        try:
+            con = self._connect_raw(shard)
+        except sqlite3.Error:
+            self._shard_sender_maps[shard] = mapping
+            return mapping
+        try:
+            if self._has_table(con, "Name2Id"):
+                cols = self._cols(con, "Name2Id")
+                if "user_name" in cols:
+                    for rowid, user_name in con.execute("SELECT rowid, user_name FROM Name2Id"):
+                        name = _as_text(user_name)
+                        if name:
+                            mapping[int(rowid)] = name
+        except sqlite3.Error:
+            pass
+        finally:
+            con.close()
+        self._shard_sender_maps[shard] = mapping
         return mapping
 
     @staticmethod
@@ -400,7 +450,15 @@ class DatabaseService:
         return f"Msg_{hashlib.md5(username.encode('utf-8')).hexdigest()}"
 
     def account_username(self, contact_username: str) -> str:
-        """Best-effort recovery of the local account's own username."""
+        """Best-effort recovery of the local account's own username.
+
+        The account directory is named ``<wxid>_<suffix>`` so dropping the final
+        ``_<digits>`` segment is the most reliable signal; the Name2Id/user tables
+        are used only as a fallback.
+        """
+        base_name, separator, suffix = self.account_id.rpartition("_")
+        if separator and base_name.startswith("wxid_") and suffix.isdigit():
+            return base_name
         usernames = set(self.sender_name_map().values())
         if self.account_id in usernames:
             return self.account_id
@@ -411,7 +469,6 @@ class DatabaseService:
         )
         if candidates:
             return candidates[0]
-        base_name, separator, _ = self.account_id.rpartition("_")
         return base_name if separator and base_name else self.account_id
 
     def me_display_name(self, contact_username: str) -> str:
@@ -421,7 +478,7 @@ class DatabaseService:
 
     # ------------------------------------------------------------------ messages
     _MSG_WANT = ("local_id", "local_type", "create_time", "status")
-    _MSG_OPTIONAL = ("real_sender_id", "message_content", "compress_content", "packed_info_data")
+    _MSG_OPTIONAL = ("real_sender_id", "message_content", "compress_content", "packed_info_data", "source")
 
     def _chat_page_rows(
         self,
@@ -433,6 +490,8 @@ class DatabaseService:
 
         Returns dict rows aligned to the union of columns found on the shards; a shard
         missing one of the wanted columns is skipped, and cells missing on a shard are None.
+        Every row carries ``_shard`` (the db file it came from) so senders can be resolved
+        against that shard's own Name2Id table, and raw bytes for the payload columns.
         """
         table = self.message_table_name(username)
         shards = self._shards_with_table(table)
@@ -463,7 +522,7 @@ class DatabaseService:
             if before is not None:
                 where = "WHERE (create_time < ?) OR (create_time = ? AND local_id < ?)"
                 params = [before[0], before[0], before[1]]
-            con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+            con = self._connect_raw(db)
             try:
                 sql = f"SELECT {select} FROM [{table}] {where} ORDER BY create_time DESC, local_id DESC LIMIT ?"
                 db_rows = con.execute(sql, [*params, limit + 1]).fetchall()
@@ -471,7 +530,8 @@ class DatabaseService:
                 con.close()
             for row in db_rows:
                 rec = dict(zip(usable, row))
-                collected.append({c: rec.get(c) for c in columns})
+                rec["_shard"] = db
+                collected.append({c: rec.get(c) for c in columns} | {"_shard": db})
         collected.sort(key=lambda r: (int(r["create_time"]), int(r["local_id"])), reverse=True)
         has_more = len(collected) > limit
         return collected[:limit], has_more
@@ -503,15 +563,15 @@ class DatabaseService:
         return total
 
     def raw_message_by_id(self, username: str, local_id: int, create_time: int | None = None) -> dict | None:
-        """One raw row dict (union columns) for a single (local_id[, create_time]).
+        """One raw row dict for a single (local_id[, create_time]).
 
         local_id is only unique within one shard, so callers that paginate across
         shards (the chat view) should also pass create_time to pick the same row
-        that the merged view would keep.
+        that the merged view would keep.  Payload columns are returned as raw bytes.
         """
         table = self.message_table_name(username)
         for db in self._shards_with_table(table):
-            con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+            con = self._connect_raw(db)
             try:
                 cols = self._cols(con, table)
                 if not set(self._MSG_WANT).issubset(cols):
@@ -529,7 +589,9 @@ class DatabaseService:
             finally:
                 con.close()
             if row:
-                return dict(zip(usable, row))
+                rec = dict(zip(usable, row))
+                rec["_shard"] = db
+                return rec
         return None
 
     def iter_chat_all(self, username: str) -> Iterator[MessageView]:
@@ -547,10 +609,24 @@ class DatabaseService:
             cursor = (int(oldest["create_time"]), int(oldest["local_id"]))
 
 
+def _as_text(value: Any) -> str:
+    """Decode a SQLite cell (bytes or str) into text without raising."""
+    if value is None:
+        return ""
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return bytes(value).decode("utf-8", "replace")
+    return str(value)
+
+
 def _build_views(db: DatabaseService, username: str, rows: list[dict]) -> list[MessageView]:
-    """Shared raw-row -> MessageView builder (rows keep their given order)."""
+    """Shared raw-row -> MessageView builder (rows keep their given order).
+
+    Sender resolution order (most reliable first):
+      1. the ``<wxid>:\\n`` prefix that group-chat text messages carry;
+      2. ``real_sender_id`` resolved against **the row's own shard** Name2Id;
+      3. ``status == 2`` heuristic for outgoing messages with no sender column.
+    """
     contact = db.contact(username)
-    sender_map = db.sender_name_map()
     account_username = db.account_username(username)
     me_display = db.me_display_name(username)
     views: list[MessageView] = []
@@ -559,29 +635,37 @@ def _build_views(db: DatabaseService, username: str, rows: list[dict]) -> list[M
         local_type = int(raw["local_type"])
         create_time = int(raw["create_time"])
         status = int(raw["status"])
-        sender_id_val = raw.get("real_sender_id")
-        sender_wxid: str | None = None
-        if sender_id_val is not None:
-            if isinstance(sender_id_val, int) or str(sender_id_val).isdigit():
-                mapped = sender_map.get(int(sender_id_val))
-                sender_wxid = mapped if mapped else str(sender_id_val)
-            else:
-                sender_wxid = str(sender_id_val)
-        outgoing = sender_wxid == account_username or (sender_wxid is None and status == 2)
-        text = render_message(
-            local_type,
-            str(raw.get("message_content") or ""),
-            str(raw.get("compress_content") or ""),
-            raw.get("packed_info_data"),
-        )
         base_type = message_base_type(local_type)
+
+        parsed: ParsedMessage = parse_payload(
+            local_type,
+            raw.get("message_content") or raw.get("compress_content"),
+            raw.get("source"),
+        )
+
+        sender_wxid = parsed.sender_hint
+        if not sender_wxid:
+            sender_id_val = raw.get("real_sender_id")
+            if sender_id_val is not None:
+                if isinstance(sender_id_val, int) or str(sender_id_val).isdigit():
+                    shard = raw.get("_shard")
+                    smap = db.sender_name_map_for_shard(shard) if shard else {}
+                    sender_wxid = smap.get(int(sender_id_val), "") or f"id:{sender_id_val}"
+                else:
+                    sender_wxid = _as_text(sender_id_val)
+
+        outgoing = sender_wxid == account_username or (not sender_wxid and status == 2)
         if outgoing:
             sender_display = me_display
         elif sender_wxid:
             peer = db.contact(sender_wxid)
             sender_display = peer.display_name if peer else sender_wxid
         else:
-            sender_display = f"unknown({status})"
+            sender_display = username if contact is not None else "未知发送者"
+
+        text = parsed.text or render_message(local_type, "", "", raw.get("packed_info_data"))
+        links = _extract_links(parsed.text, parsed.raw_xml, raw.get("packed_info_data"))
+
         views.append(
             MessageView(
                 local_id=local_id,
@@ -590,10 +674,13 @@ def _build_views(db: DatabaseService, username: str, rows: list[dict]) -> list[M
                 create_time=create_time,
                 is_outgoing=outgoing,
                 sender=sender_display,
+                sender_wxid=sender_wxid or "",
                 text=text,
-                display_type=TYPE_LABEL.get(base_type, "other"),
-                links=_extract_links(raw.get("message_content"), raw.get("compress_content"), raw.get("packed_info_data")),
-                raw_content=str(raw.get("message_content") or ""),
+                display_type=TYPE_LABEL.get(base_type, parsed.kind or "other"),
+                kind=parsed.kind or TYPE_LABEL.get(base_type, "other"),
+                media=parsed.meta.to_dict() if parsed.meta else {},
+                links=links,
+                raw_content=parsed.plain[:20000],
                 packed_info_data=raw.get("packed_info_data"),
             )
         )

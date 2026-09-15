@@ -84,6 +84,29 @@ table.dbs td, table.dbs th { padding: 5px 8px; border-bottom: 1px solid #1e232b;
 .msg .warn { display: inline-block; color: #ffd479; font-size: 12px; margin-top: 3px; }
 .check { color: #b7bdc6; font-size: 13px; display: flex; gap: 8px; align-items: flex-start; line-height: 1.5; }
 .check code { background: #1e242c; padding: 0 4px; border-radius: 4px; }
+/* ---- media cards (M4) ---- */
+.mediaCard { position: relative; margin-top: 6px; }
+.mediaCard.image > a, .mediaCard.video > video { display: block; }
+.mediaBadge { position: absolute; right: 6px; bottom: 6px; background: rgba(0,0,0,.62); color: #dfe5ea; font-size: 10px; padding: 2px 6px; border-radius: 5px; pointer-events: none; }
+.mediaVideo { max-width: 340px; border-radius: 8px; background: #000; }
+.mediaCard.stub, .mediaCard.app { display: flex; gap: 9px; align-items: flex-start; background: #171c22; border: 1px solid #2b333d; border-radius: 10px; padding: 8px 10px; min-width: 190px; max-width: 340px; }
+.msg.me .mediaCard.stub, .msg.me .mediaCard.app { background: #1b3a2c; border-color: #2c6b4c; }
+.stubIcon { font-size: 19px; line-height: 1.1; flex: 0 0 auto; opacity: .92; }
+.stubBody { min-width: 0; flex: 1 1 auto; }
+.stubTitle { font-size: 13px; font-weight: 600; color: #e7ebef; }
+.appTitle { font-size: 13px; font-weight: 600; color: #e7ebef; word-break: break-word; }
+.stubSub { font-size: 11px; color: #98a1ab; margin-top: 2px; }
+.stubWhy { font-size: 11px; color: #d9a05b; margin-top: 3px; }
+.appUrl { display: block; font-size: 11px; color: #78c8a4; margin-top: 3px; text-decoration: none; word-break: break-all; }
+.mediaCard.voice { display: flex; align-items: center; gap: 8px; }
+.voicePlayer { height: 34px; max-width: 250px; }
+.voiceDur { font-size: 11px; color: #98a1ab; }
+.voiceStub .stubIcon { filter: saturate(.7); }
+.quoteBar { font-size: 11px; color: #9aa0a6; border-left: 2px solid #4a5462; padding: 2px 0 2px 7px; margin-bottom: 4px; word-break: break-word; }
+.whoUnknown { color: #8b929c; font-weight: 400; }
+.sysmsg { align-self: center; max-width: 82%; text-align: center; margin: 6px 0; }
+.sysmsg .sysBody { display: inline-block; background: #1a1e24; border: 1px solid #262d36; color: #98a1ab; font-size: 11.5px; padding: 4px 10px; border-radius: 10px; line-height: 1.5; }
+.sysmsg .time { font-size: 10px; color: #5d6570; margin-top: 2px; }
 .msg .time { font-size: 10px; color: #5d6570; margin: 2px 6px 0; }
 #moreBtn { align-self: center; margin: 8px 0; }
 #taskToast { position: fixed; right: 18px; bottom: 18px; width: 420px; max-width: 92vw; background: #161a20; border: 1px solid #2a323c; border-radius: 12px; padding: 12px; box-shadow: 0 8px 30px rgba(0,0,0,.5); display: none; z-index: 20; }
@@ -550,31 +573,194 @@ async function fetchChat(older = false) {
     wrap.appendChild(btn);
   }
 }
+// ------------------------------------------------------------ message render
+// Every message kind gets a dedicated card: real media when it can be read,
+// an informative stub (size / duration / reason) when it cannot — never a bare
+// placeholder or a raw file link.
+function fmtSize(n) {
+  if (!n) return "";
+  if (n < 1024) return n + " B";
+  if (n < 1048576) return (n / 1024).toFixed(1) + " KB";
+  return (n / 1048576).toFixed(1) + " MB";
+}
+function fmtDur(ms) {
+  if (!ms) return "";
+  const s = Math.round(ms / 1000);
+  if (s < 60) return s + "″";
+  return Math.floor(s / 60) + "′" + String(s % 60).padStart(2, "0") + "″";
+}
+function metaLine(meta) {
+  if (!meta) return "";
+  const bits = [];
+  if (meta.width && meta.height) bits.push(meta.width + "×" + meta.height);
+  if (meta.duration_ms) bits.push(fmtDur(meta.duration_ms));
+  else if (meta.call_duration_s) bits.push(fmtDur(meta.call_duration_s * 1000));
+  if (meta.length) bits.push(fmtSize(meta.length));
+  return bits.join(" · ");
+}
+function stubCard(icon, title, subtitle, why, cls) {
+  const card = document.createElement("div");
+  card.className = "mediaCard stub" + (cls ? " " + cls : "");
+  const ic = document.createElement("div"); ic.className = "stubIcon"; ic.textContent = icon;
+  const box = document.createElement("div"); box.className = "stubBody";
+  const t = document.createElement("div"); t.className = "stubTitle"; t.textContent = title;
+  box.appendChild(t);
+  if (subtitle) { const s = document.createElement("div"); s.className = "stubSub"; s.textContent = subtitle; box.appendChild(s); }
+  if (why) { const w = document.createElement("div"); w.className = "stubWhy"; w.textContent = why; box.appendChild(w); }
+  card.append(ic, box);
+  return card;
+}
+function appCard(icon, title, sub, url) {
+  const card = document.createElement("div"); card.className = "mediaCard app";
+  const ic = document.createElement("div"); ic.className = "stubIcon"; ic.textContent = icon;
+  const box = document.createElement("div"); box.className = "stubBody";
+  const t = document.createElement("div"); t.className = "appTitle"; t.textContent = title || "(无标题)";
+  box.appendChild(t);
+  if (sub) { const s = document.createElement("div"); s.className = "stubSub"; s.textContent = sub; box.appendChild(s); }
+  if (url) {
+    const a = document.createElement("a"); a.className = "appUrl"; a.href = url; a.target = "_blank";
+    a.rel = "noreferrer"; a.textContent = url.length > 68 ? url.slice(0, 68) + "…" : url;
+    box.appendChild(a);
+  }
+  card.append(ic, box);
+  return card;
+}
+function voiceCard(m) {
+  const md = m.media || {}, meta = m.meta || {};
+  const dur = fmtDur(meta.duration_ms);
+  if ((md.status === "ok") && md.url) {
+    const card = document.createElement("div"); card.className = "mediaCard voice";
+    const audio = document.createElement("audio");
+    audio.controls = true; audio.preload = "none"; audio.src = md.url; audio.className = "voicePlayer";
+    const metaEl = document.createElement("span"); metaEl.className = "voiceDur"; metaEl.textContent = dur || "语音";
+    card.append(audio, metaEl);
+    return card;
+  }
+  const why = md.status === "ok"
+    ? "未安装 SILK 解码器，无法播放"
+    : (md.detail || (md.status === "missing" ? "本机语音缓存已过期" : "无法读取语音"));
+  return stubCard("🔊", "语音" + (dur ? " " + dur : ""), "", why, "voiceStub");
+}
+function imageCard(m) {
+  const md = m.media || {}, meta = m.meta || {};
+  const info = metaLine(meta);
+  if (md.status === "ok" && md.url) {
+    const card = document.createElement("div"); card.className = "mediaCard image";
+    const a = document.createElement("a"); a.href = md.url; a.target = "_blank";
+    const img = document.createElement("img"); img.className = "mediaImg"; img.loading = "lazy"; img.alt = "图片";
+    img.onerror = () => { a.replaceWith(stubCard("🖼", "图片", info, "图片读取失败")); };
+    img.src = md.url;
+    a.appendChild(img); card.appendChild(a);
+    if (info) { const badge = document.createElement("div"); badge.className = "mediaBadge"; badge.textContent = info; card.appendChild(badge); }
+    return card;
+  }
+  const why = md.status === "missing"
+    ? "原文件已被微信清理"
+    : (md.detail || "新版加密格式，离线无法解密");
+  return stubCard("🖼", "图片", info, why);
+}
+function videoCard(m) {
+  const md = m.media || {}, meta = m.meta || {};
+  const info = metaLine(meta);
+  if (md.status === "ok" && md.url && !md.is_thumbnail) {
+    const card = document.createElement("div"); card.className = "mediaCard video";
+    const v = document.createElement("video");
+    v.controls = true; v.preload = "metadata"; v.src = md.url; v.className = "mediaVideo";
+    card.appendChild(v);
+    if (info) { const badge = document.createElement("div"); badge.className = "mediaBadge"; badge.textContent = info; card.appendChild(badge); }
+    return card;
+  }
+  if (md.status === "ok" && md.url) {
+    const card = document.createElement("div"); card.className = "mediaCard image";
+    const a = document.createElement("a"); a.href = md.url; a.target = "_blank";
+    const img = document.createElement("img"); img.className = "mediaImg thumb"; img.loading = "lazy"; img.alt = "视频缩略图"; img.src = md.url;
+    a.appendChild(img); card.appendChild(a);
+    const note = document.createElement("div"); note.className = "stubSub"; note.textContent = "仅存缩略图（原视频已被微信清理）" + (info ? " · " + info : "");
+    card.appendChild(note);
+    return card;
+  }
+  const why = md.status === "missing" ? "原视频已被微信清理" : (md.detail || "视频不可用");
+  return stubCard("🎬", "视频", info, why);
+}
+function quoteBar(quoted) {
+  const bar = document.createElement("div"); bar.className = "quoteBar";
+  const text = quoted.content || quoted.title || "";
+  bar.textContent = "引用：" + (text.length > 90 ? text.slice(0, 90) + "…" : text);
+  return bar;
+}
+function appendMedia(bubble, m) {
+  const meta = m.meta || {};
+  const md = m.media || {};
+  const kind = m.kind || m.display_type;
+
+  if (kind === "image") { bubble.appendChild(imageCard(m)); return; }
+  if (kind === "voice") { bubble.appendChild(voiceCard(m)); return; }
+  if (kind === "video") { bubble.appendChild(videoCard(m)); return; }
+  if (kind === "emoji") { bubble.appendChild(stubCard("😀", "表情", metaLine(meta), "")); return; }
+  if (kind === "location") {
+    const place = [meta.poi, meta.city].filter(Boolean).join(" · ") || "位置";
+    const coords = (meta.latitude && meta.longitude) ? meta.latitude.toFixed(5) + ", " + meta.longitude.toFixed(5) : "";
+    bubble.appendChild(appCard("📍", place, coords, ""));
+    return;
+  }
+  if (kind === "call") {
+    bubble.appendChild(appCard("📞", meta.call_text || ("通话 " + fmtDur((meta.call_duration_s || 0) * 1000)), "语音通话", ""));
+    return;
+  }
+  if (kind === "card") {
+    bubble.appendChild(appCard("👤", meta.nickname || meta.username || "名片", meta.username || "", ""));
+    return;
+  }
+  if (kind === "file") {
+    const sub = (meta.extra && meta.extra.fileext ? meta.extra.fileext.toUpperCase() + " 文件" : "文件");
+    bubble.appendChild(appCard("📄", meta.title || "文件", sub, ""));
+    return;
+  }
+  if (kind === "quote") {
+    if (meta.quoted) bubble.appendChild(quoteBar(meta.quoted));
+    bubble.appendChild(appCard("💬", meta.title || "引用消息", "", ""));
+    return;
+  }
+  if (kind === "link" || kind === "music" || kind === "weapp" || kind === "transfer" || kind === "red packet") {
+    const icons = { link: "🔗", music: "🎵", weapp: "🧩", transfer: "💰", "red packet": "🧧" };
+    if (meta.quoted) bubble.appendChild(quoteBar(meta.quoted));
+    bubble.appendChild(appCard(icons[kind] || "🔗", meta.title || meta.label || "卡片", meta.label || "", meta.url || ""));
+    return;
+  }
+  if (kind === "system" || kind === "other") {
+    if (m.text) { const t = document.createElement("span"); t.textContent = m.text; bubble.appendChild(t); }
+    return;
+  }
+  // plain text (and anything unrecognised): keep the text, plus links
+  if (m.text) { const t = document.createElement("span"); t.textContent = m.text; bubble.appendChild(t); }
+}
 function renderMessages(messages, prepend) {
   const body = $("chatBody");
   const frag = document.createDocumentFragment();
   messages.forEach(m => {
+    const isSystem = m.kind === "system" || m.base_type === 10000;
     const div = document.createElement("div");
-    div.className = "msg " + (m.is_outgoing ? "me" : "peer");
     div.dataset.ct = m.create_time; div.dataset.lid = m.local_id;
-    const who = document.createElement("div"); who.className = "who";
-    who.textContent = m.is_outgoing ? "我" : m.sender;
-    const bubble = document.createElement("div"); bubble.className = "bubble";
-    const hasOkMedia = m.media && m.media.status === "ok";
-    if (m.display_type !== "text" && !hasOkMedia) {
-      const tag = document.createElement("span"); tag.className = "tag"; tag.textContent = "[" + m.display_type + "]";
-      bubble.appendChild(tag);
+    if (isSystem) {
+      div.className = "sysmsg";
+      const s = document.createElement("div"); s.className = "sysBody"; s.textContent = m.text || "系统消息";
+      const t = document.createElement("div"); t.className = "time"; t.textContent = fmtTime(m.create_time);
+      div.append(s, t);
+      frag.appendChild(div);
+      return;
     }
-    // for ok media the placeholder text is replaced by the actual media element
-    const showText = !(m.media && (m.media.status === "ok" || (m.media.kind === "image" && m.media.status === "unsupported")));
-    if (showText) {
-      const text = document.createElement("span"); text.textContent = m.text;
-      bubble.appendChild(text);
+    div.className = "msg " + (m.is_outgoing ? "me" : "peer");
+    const who = document.createElement("div"); who.className = "who";
+    who.textContent = m.is_outgoing ? "我" : (m.sender || "群成员");
+    const bubble = document.createElement("div"); bubble.className = "bubble";
+    if (m.sender_wxid && String(m.sender_wxid).startsWith("id:") && !m.is_outgoing) {
+      const warn = document.createElement("span"); warn.className = "whoUnknown"; warn.textContent = "（未能识别的成员）";
+      who.appendChild(warn);
     }
     appendMedia(bubble, m);
     if (m.links && m.links.length) {
       const links = document.createElement("div"); links.className = "links";
-      m.links.forEach(l => { const a = document.createElement("a"); a.href = l; a.target = "_blank"; a.textContent = l; links.appendChild(a); });
+      m.links.forEach(l => { const a = document.createElement("a"); a.href = l; a.target = "_blank"; a.rel = "noreferrer"; a.textContent = l; links.appendChild(a); });
       bubble.appendChild(links);
     }
     const time = document.createElement("div"); time.className = "time"; time.textContent = fmtTime(m.create_time);
@@ -583,45 +769,6 @@ function renderMessages(messages, prepend) {
   });
   if (prepend) body.prepend(frag); else { body.innerHTML = ""; body.appendChild(frag); }
   body.scrollTop = prepend ? frag.firstChild.offsetTop - 100 : body.scrollHeight;
-}
-function appendMedia(bubble, m) {
-  if (!m.media) return;
-  const md = m.media;
-  if (md.status === "ok") {
-    if (md.kind === "image") {
-      const wrap = document.createElement("div"); wrap.className = "mediaWrap";
-      const a = document.createElement("a"); a.href = md.url; a.target = "_blank";
-      const img = document.createElement("img"); img.className = "mediaImg"; img.loading = "lazy"; img.alt = "图片";
-      img.onerror = () => { wrap.innerHTML = '<span class="warn">图片读取失败</span>'; };
-      img.src = md.url;
-      a.appendChild(img); wrap.appendChild(a); bubble.appendChild(wrap);
-    } else if (md.kind === "voice") {
-      const a = document.createElement("a"); a.className = "voiceLink"; a.href = md.url;
-      a.textContent = "🎤 语音（.silk 原始格式，点击下载" + (md.size ? " · " + Math.max(1, Math.round(md.size / 1024)) + " KB" : "") + "）";
-      bubble.appendChild(a);
-    } else if (md.kind === "video") {
-      if (md.is_thumbnail) {
-        const wrap = document.createElement("div"); wrap.className = "mediaWrap";
-        const img = document.createElement("img"); img.className = "mediaImg thumb"; img.loading = "lazy"; img.alt = "视频缩略图";
-        img.onerror = () => { wrap.innerHTML = ""; };
-        img.src = md.url;
-        wrap.appendChild(img);
-        bubble.appendChild(wrap);
-        const note = document.createElement("div"); note.className = "mediaNote"; note.textContent = "原视频已被微信清理，仅存缩略图（点图下载）";
-        bubble.appendChild(note);
-      } else {
-        const a = document.createElement("a"); a.className = "voiceLink"; a.href = md.url;
-        a.textContent = "🎬 视频（" + (md.detail || "") + "，点击下载）";
-        bubble.appendChild(a);
-      }
-    }
-    return;
-  }
-  if (md.status === "unsupported" || md.status === "missing" || md.status === "no-md5") {
-    const w = document.createElement("span"); w.className = "warn";
-    w.textContent = "⚠️ " + (md.detail || md.status);
-    bubble.appendChild(w);
-  }
 }
 function openExportTab() {
   if (!currentChat) { alert("请先在「浏览聊天」选择一个会话"); goto(4); return; }

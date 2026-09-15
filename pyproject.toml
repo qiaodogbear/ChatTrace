@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "chattrace"
-version = "0.3.0"
-description = "Local WeChat 4.x (4.1.11+) chat toolchain: KeyAgent capture, guided Web UI, decrypt, browse, media + txt/json/html export."
+version = "0.4.0"
+description = "Local WeChat 4.x (4.1.11+) chat toolchain: KeyAgent capture, guided Web UI, decrypt, browse, media playback + txt/json/html export."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
@@ -22,6 +22,8 @@ classifiers = [
 dependencies = [
   "frida>=16.0.0",
   "pycryptodomex>=3.20",
+  "zstandard>=0.22",
+  "silk-python>=0.2.8",
 ]
 
 [project.optional-dependencies]

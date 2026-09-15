@@ -127,11 +127,6 @@ class ChatExportService:
                 extras = [link for link in msg.links if link not in msg.text]
                 if extras:
                     line += "  " + " ".join(extras)
-            if include_media and media is not None and msg.display_type in ("image", "voice", "video"):
-                item = media.item_for_message(self.db, username, msg)
-                note = self._media_note(item)
-                if note:
-                    line += "  " + note
             fh.write(line + "\n")
             count += 1
             if progress and count % 500 == 0:
@@ -143,21 +138,24 @@ class ChatExportService:
     def _message_dicts(self, username: str, progress: ProgressCallback | None, include_media: bool = False, media=None):
         for msg in self.db.iter_chat_all(username):
             item = None
-            if include_media and media is not None and msg.display_type in ("image", "voice", "video"):
-                it = media.item_for_message(self.db, username, msg)
-                item = {
-                    "kind": it.kind, "status": it.status, "ref": it.ref,
-                    "detail": it.detail, "size": it.size,
-                }
+            if include_media and media is not None and msg.kind in ("image", "voice", "video"):
+                try:
+                    it = media.item_for_message(self.db, username, msg)
+                    item = {"kind": it.kind, "status": it.status, "detail": it.detail, "size": it.size}
+                except Exception:
+                    item = None
             yield {
                 "local_id": msg.local_id,
                 "create_time": msg.create_time,
                 "time": _ts(msg.create_time),
                 "sender": msg.sender,
+                "sender_wxid": msg.sender_wxid,
                 "is_outgoing": msg.is_outgoing,
+                "kind": msg.kind,
                 "type": msg.display_type,
                 "local_type": msg.local_type,
                 "text": msg.text,
+                "meta": msg.media or None,
                 "links": list(msg.links),
                 **({"media": item} if item is not None else {}),
             }
@@ -210,13 +208,23 @@ class ChatExportService:
             bubble = "me" if msg.is_outgoing else "peer"
             name = "我" if msg.is_outgoing else html.escape(msg.sender)
             tag = ""
-            if msg.display_type != "text":
-                tag = f'<span class="tag">{html.escape(msg.display_type)}</span> '
-            body = html.escape(msg.text).replace("\n", "<br>")
+            body = ""
             extra = ""
-            if include_media and media is not None and msg.display_type in ("image", "voice", "video"):
-                item = media.item_for_message(self.db, username, msg)
-                extra = self._html_media_block(item, msg, username, assets_dir, media_stats)
+            if msg.kind == "system":
+                fh.write(
+                    f'<div class="sysmsg"><div class="sysbody">{html.escape(msg.text)}</div>'
+                    f'<div class="time">{_ts(msg.create_time)}</div></div>\n'
+                )
+                count += 1
+                if progress and count % 500 == 0:
+                    progress(count, None)
+                continue
+            if msg.kind == "text":
+                body = html.escape(msg.text).replace("\n", "<br>")
+            else:
+                extra = self._html_card(msg, username, assets_dir, media_stats, include_media, media)
+                if msg.kind in ("emoji", "other"):
+                    body = html.escape(msg.text)
             fh.write(
                 f'<div class="msg {bubble}"><div class="who">{name}</div>'
                 f'<div class="bubble">{tag}{body}{extra}</div>'
@@ -227,11 +235,10 @@ class ChatExportService:
                 progress(count, None)
         fh.write("</div>\n")
         if assets_dir is not None:
-            total = sum(v for k, v in media_stats.items() if k != "skipped")
             fh.write(
                 f'<div class="footer">{count} messages · 媒体附件目录: '
-                f'{html.escape(assets_dir.name)}/（图片 {media_stats["image"]}，'
-                f'语音 {media_stats["voice"]}，视频 {media_stats["video"]}）</div>\n'
+                f'{html.escape(assets_dir.name)}/（图片 {media_stats.get("image", 0)}，'
+                f'语音 {media_stats.get("voice", 0)}，视频 {media_stats.get("video", 0)}）</div>\n'
             )
         else:
             fh.write(f'<div class="footer">{count} messages</div>\n')
@@ -240,37 +247,151 @@ class ChatExportService:
             progress(count, None)
         return count
 
-    def _html_media_block(self, item, msg, username: str, assets_dir: Path | None, stats: dict) -> str:
-        """Render one media item inside the bubble; writes the asset when ok."""
-        kind = item.kind
-        stats.setdefault(kind, 0)
-        if item.status == "ok":
-            asset = None
-            if assets_dir is not None:
-                asset = self._write_media_asset(item, msg, username, assets_dir)
-            stats[kind] += 1
-            if kind == "image":
+    # ---------------------------------------------------------- html cards
+    def _html_card(self, msg, username: str, assets_dir: Path | None, stats: dict,
+                   include_media: bool, media) -> str:
+        """Render one non-text message as a card (mirrors the Web UI rendering)."""
+        meta = msg.media or {}
+        kind = msg.kind
+
+        def esc(value) -> str:
+            return html.escape(str(value or ""))
+
+        def fmt_size(n) -> str:
+            n = int(n or 0)
+            if n <= 0:
+                return ""
+            if n < 1024:
+                return f"{n} B"
+            if n < 1048576:
+                return f"{n / 1024:.1f} KB"
+            return f"{n / 1024 / 1024:.1f} MB"
+
+        def fmt_dur(ms) -> str:
+            ms = int(ms or 0)
+            if ms <= 0:
+                return ""
+            seconds = round(ms / 1000)
+            if seconds < 60:
+                return f"{seconds}″"
+            return f"{seconds // 60}′{seconds % 60:02d}″"
+
+        info_bits = []
+        if meta.get("width") and meta.get("height"):
+            info_bits.append(f"{meta['width']}×{meta['height']}")
+        if meta.get("duration_ms"):
+            info_bits.append(fmt_dur(meta["duration_ms"]))
+        elif meta.get("call_duration_s"):
+            info_bits.append(fmt_dur(meta["call_duration_s"] * 1000))
+        if meta.get("length"):
+            info_bits.append(fmt_size(meta["length"]))
+        info = " · ".join(info_bits)
+
+        def stub(icon: str, title: str, sub: str, why: str = "") -> str:
+            parts = [f'<div class="card stub"><span class="ic">{esc(icon)}</span><div class="cbody">',
+                     f'<div class="ctitle">{esc(title)}</div>']
+            if sub:
+                parts.append(f'<div class="csub">{esc(sub)}</div>')
+            if why:
+                parts.append(f'<div class="cwhy">{esc(why)}</div>')
+            parts.append("</div></div>")
+            return "".join(parts)
+
+        def app(icon: str, title: str, sub: str = "", url: str = "") -> str:
+            parts = [f'<div class="card app"><span class="ic">{esc(icon)}</span><div class="cbody">',
+                     f'<div class="ctitle">{esc(title)}</div>']
+            if sub:
+                parts.append(f'<div class="csub">{esc(sub)}</div>')
+            if url:
+                safe = esc(url) if url.startswith(("http://", "https://")) else ""
+                if safe:
+                    parts.append(f'<a class="curl" href="{safe}" target="_blank" rel="noreferrer">{esc(url[:68])}</a>')
+                else:
+                    parts.append(f'<div class="curl">{esc(url[:68])}</div>')
+            parts.append("</div></div>")
+            return "".join(parts)
+
+        def quote_bar(quoted: dict) -> str:
+            text = quoted.get("content") or quoted.get("title") or ""
+            return f'<div class="quote">引用：{esc(text[:90])}</div>' if text else ""
+
+        if kind == "image":
+            item = media.item_for_message(self.db, username, msg) if media is not None else None
+            if item is not None and item.status == "ok":
+                asset = self._write_media_asset(item, msg, username, assets_dir) if assets_dir else None
                 if asset is not None:
-                    rel = asset.name
-                    return f'<br><a href="{html.escape(rel)}" target="_blank"><img class="media-img" loading="lazy" src="{html.escape(rel)}" alt="图片"></a>'
-                return "<br><span class='media-warn'>⚠️ 图片（解码失败）</span>"
-            if kind == "voice":
+                    stats["image"] = stats.get("image", 0) + 1
+                    rel = esc(asset.name)
+                    badge = f'<div class="badge">{esc(info)}</div>' if info else ""
+                    return (f'<div class="card media"><a href="{rel}" target="_blank">'
+                            f'<img loading="lazy" src="{rel}" alt="图片"></a>{badge}</div>')
+                return stub("🖼", "图片", info, "图片解码失败")
+            why = item.detail if item is not None else "图片不可用"
+            if item is None or item.status != "ok":
+                stats["skipped"] = stats.get("skipped", 0) + 1
+            return stub("🖼", "图片", info, why)
+
+        if kind == "voice":
+            item = media.item_for_message(self.db, username, msg) if media is not None else None
+            duration = fmt_dur(meta.get("duration_ms"))
+            if item is not None and item.status == "ok" and media is not None:
+                wav = media.voice_wav(username, int(msg.local_id), int(msg.create_time))
+                if wav is not None and assets_dir is not None:
+                    target = assets_dir / f"{msg.local_id}.wav"
+                    if not target.exists():
+                        tmp = target.with_suffix(".wav.tmp")
+                        tmp.write_bytes(wav)
+                        tmp.replace(target)
+                    stats["voice"] = stats.get("voice", 0) + 1
+                    return (f'<div class="card voice"><audio controls preload="none" src="{esc(target.name)}"></audio>'
+                            f'<span class="csub">{esc(duration or "语音")}</span></div>')
+                why = "未安装 SILK 解码器，无法转码播放"
+            else:
+                why = (item.detail if item is not None else "") or "本机语音缓存已过期"
+            stats["skipped"] = stats.get("skipped", 0) + 1
+            return stub("🔊", f"语音 {duration}".strip(), "", why)
+
+        if kind == "video":
+            item = media.item_for_message(self.db, username, msg) if media is not None else None
+            if item is not None and item.status == "ok":
+                asset = self._write_media_asset(item, msg, username, assets_dir) if assets_dir else None
                 if asset is not None:
-                    return f'<br><a class="voice" href="{html.escape(asset.name)}">🎤 语音 {msg.text}</a>'
-                return "<br><span class='media-warn'>⚠️ 语音不可用</span>"
-            if kind == "video":
-                if asset is not None and item.is_thumbnail:
-                    return (f'<br><img class="media-img thumb" loading="lazy" src="{html.escape(asset.name)}" alt="视频缩略图">'
-                            f'<div class="media-note">仅剩缩略图（原视频已被微信清理）· '
-                            f'<a href="{html.escape(asset.name)}">下载缩略图</a></div>')
-                if asset is not None:
-                    return (f'<br><video class="media-video" controls preload="metadata" src="{html.escape(asset.name)}"></video>'
-                            f'<div class="media-note"><a href="{html.escape(asset.name)}">下载视频（{item.detail}）</a></div>')
-                return "<br><span class='media-warn'>⚠️ 视频不可用</span>"
-        if item.status == "unsupported" or item.status == "missing" or item.status == "no-md5":
-            stats["skipped"] += 1
-            return f"<br><span class='media-warn'>⚠️ {html.escape(item.detail)}</span>"
-        return ""
+                    stats["video"] = stats.get("video", 0) + 1
+                    rel = esc(asset.name)
+                    if item.is_thumbnail:
+                        return (f'<div class="card media"><img loading="lazy" src="{rel}" alt="视频缩略图">'
+                                f'<div class="csub">仅剩缩略图（原视频已被微信清理）{(" · " + esc(info)) if info else ""}</div></div>')
+                    return (f'<div class="card media"><video controls preload="metadata" src="{rel}"></video>'
+                            f'<div class="csub">{esc(info)}</div></div>')
+            stats["skipped"] = stats.get("skipped", 0) + 1
+            why = (item.detail if item is not None else "") or "原视频已被微信清理"
+            return stub("🎬", "视频", info, why)
+
+        if kind == "emoji":
+            return stub("😀", "表情", info)
+        if kind == "location":
+            place = " · ".join(x for x in (meta.get("poi"), meta.get("city")) if x) or "位置"
+            coords = ""
+            if meta.get("latitude") and meta.get("longitude"):
+                coords = f"{meta['latitude']:.5f}, {meta['longitude']:.5f}"
+            return app("📍", place, coords)
+        if kind == "call":
+            title = meta.get("call_text") or f"通话 {fmt_dur((meta.get('call_duration_s') or 0) * 1000)}"
+            return app("📞", title, "语音通话")
+        if kind == "card":
+            return app("👤", meta.get("nickname") or meta.get("username") or "名片", meta.get("username") or "")
+        if kind == "file":
+            ext = (meta.get("extra") or {}).get("fileext", "")
+            return app("📄", meta.get("title") or "文件", (ext.upper() + " 文件") if ext else "文件")
+        if kind == "quote":
+            return quote_bar(meta.get("quoted") or {}) + app("💬", meta.get("title") or "引用消息")
+        if kind in ("link", "music", "weapp", "transfer", "red packet"):
+            icons = {"link": "🔗", "music": "🎵", "weapp": "🧩", "transfer": "💰", "red packet": "🧧"}
+            return quote_bar(meta.get("quoted") or {}) + app(
+                icons.get(kind, "🔗"), meta.get("title") or meta.get("label") or "卡片",
+                meta.get("label") or "", meta.get("url") or "",
+            )
+        return f'<span>{esc(msg.text)}</span>'
 
     def _write_media_asset(self, item, msg, username: str, assets_dir: Path) -> Path | None:
         """Materialize the media payload next to the exported HTML; returns the file."""
@@ -329,6 +450,28 @@ _HTML_HEAD = """<!DOCTYPE html>
   .time {{ font-size: 11px; color:#6b7280; margin-top: 2px; padding: 0 4px; }}
   .footer {{ text-align:center; color:#6b7280; font-size: 12px; padding: 8px 0 24px; }}
   .media-img {{ display:block; max-width: 320px; max-height: 320px; border-radius: 8px; margin-top: 8px; border:1px solid #333a44; }}
+  /* ---- cards (M4) ---- */
+  .card {{ margin-top: 6px; }}
+  .card.media {{ position: relative; }}
+  .card.media img {{ display:block; max-width: 320px; max-height: 320px; border-radius: 8px; border:1px solid #333a44; }}
+  .card.media img.thumb {{ max-width: 160px; max-height: 160px; }}
+  .card.media video {{ display:block; max-width: 360px; border-radius: 8px; background:#000; }}
+  .badge {{ position:absolute; right:6px; bottom:6px; background: rgba(0,0,0,.62); color:#dfe5ea; font-size:10px; padding:2px 6px; border-radius:5px; }}
+  .card.stub, .card.app {{ display:flex; gap:9px; align-items:flex-start; background:#171c22; border:1px solid #2b333d;
+                           border-radius:10px; padding:8px 10px; min-width:190px; max-width:340px; }}
+  .msg.me .card.stub, .msg.me .card.app {{ background:#1b3a2c; border-color:#2c6b4c; }}
+  .card .ic {{ font-size:19px; line-height:1.1; }}
+  .card .cbody {{ min-width:0; }}
+  .card .ctitle {{ font-size:13px; font-weight:600; }}
+  .card .csub {{ font-size:11px; color:#98a1ab; margin-top:2px; }}
+  .card .cwhy {{ font-size:11px; color:#d9a05b; margin-top:3px; }}
+  .card .curl {{ display:block; font-size:11px; color:#78c8a4; margin-top:3px; word-break:break-all; }}
+  .card.voice {{ display:flex; align-items:center; gap:8px; }}
+  .card.voice audio {{ height:34px; max-width:250px; }}
+  .quote {{ font-size:11px; color:#9aa0a6; border-left:2px solid #4a5462; padding:2px 0 2px 7px; margin-top:4px; word-break:break-word; }}
+  .sysmsg {{ align-self:center; max-width:82%; text-align:center; margin:6px 0; }}
+  .sysbody {{ display:inline-block; background:#1a1e24; border:1px solid #262d36; color:#98a1ab; font-size:11.5px; padding:4px 10px; border-radius:10px; line-height:1.5; }}
+  .sysmsg .time {{ font-size:10px; color:#5d6570; }}
   .media-img.thumb {{ max-width: 160px; max-height: 160px; }}
   .media-video {{ display:block; max-width: 380px; margin-top: 8px; border-radius: 8px; background:#000; }}
   .voice {{ color:#7fd0a0; font-weight:600; text-decoration:none; }}
