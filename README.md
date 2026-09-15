@@ -13,6 +13,10 @@
 > capture the database key with Frida, decrypt, browse, and export — text **and** media —
 > without a single byte leaving your machine.
 
+<img src="docs/images/step4-browse.png" width="900" alt="ChatTrace Web UI：浏览聊天，图片直接显示，语音一键导出">
+
+<sub>引导式 Web UI：消息气泡视图 · 可解密图片直接渲染 · 语音 / 视频一键归档 · 无法离线导出的内容如实标注（截图为演示数据，真实昵称/路径/内容已替换）</sub>
+
 ---
 
 ## 项目缘起
@@ -123,6 +127,23 @@ ChatTrace 自己实现了这套解密内核：逐库独立派生、逐页 AES-CB
 
 ---
 
+## 界面预览
+
+五步引导流程，全部在本机 `127.0.0.1` 上运行（截图为演示数据）：
+
+<table>
+<tr>
+<td width="50%"><img src="docs/images/step1-account.png" alt="第 1 步：选择账号"><br><sub><b>1 · 选择账号</b>：自动发现 <code>xwechat_files</code> 下的账号目录，也可手动指定路径</sub></td>
+<td width="50%"><img src="docs/images/step2-key.png" alt="第 2 步：密钥"><br><sub><b>2 · 密钥</b>：一键自动获取（Frida KeyAgent），或手动导入旧密钥；界面只显示指纹</sub></td>
+</tr>
+<tr>
+<td width="50%"><img src="docs/images/step3-decrypt.png" alt="第 3 步：解密"><br><sub><b>3 · 解密数据</b>：逐库状态与增量刷新（本机实测 25 个库全部就绪）</sub></td>
+<td width="50%"><img src="docs/images/step5-export.png" alt="第 5 步：导出"><br><sub><b>5 · 导出</b>：txt / json / html 三种格式，可勾选「包含媒体」一并归档图片与语音</sub></td>
+</tr>
+</table>
+
+---
+
 ## 与其它方案的定位差异
 
 | 关注点 | 常见做法 | ChatTrace |
@@ -139,6 +160,9 @@ ChatTrace 自己实现了这套解密内核：逐库独立派生、逐页 AES-CB
 ---
 
 ## 快速开始
+
+> 📘 **第一次使用？** 直接看 **[新手图文指南](docs/beginner_guide.md)**——
+> 五步流程逐步截图、常见问题（FAQ）与错误码对照表都在那里。
 
 ### 方式一：下载发布包（推荐）
 
@@ -320,6 +344,19 @@ Web 服务用标准库 `http.server`，前端是无构建步骤的单文件页�
   无任何关联；不包含微信专有代码或资源；不提供云端或网络能力。
 - 请勿用于他人账号、未授权数据或任何违反当地法律与平台条款的用途。
   逆向研究存在法律与条款风险（社区已有因平台函件删库的先例），请自行评估后再使用。
+
+## 文档与反馈
+
+| 文档 | 内容 |
+| --- | --- |
+| [新手图文指南](docs/beginner_guide.md) | 五步上手（带截图）、FAQ、错误码对照表、清理方式 |
+| [媒体格式与解密笔记](docs/media-format-notes.md) | 图片 dat 三态、语音存放位置、消息↔文件关联方式与跨分片陷阱 |
+| [NOTICE.md](NOTICE.md) / [REFERENCES.md](REFERENCES.md) | 第三方许可、参考来源、合规边界 |
+| [发布说明](https://github.com/qiaodogbear/ChatTrace/releases) | 各版本的新增能力与已知限制 |
+
+遇到问题时，[新建 Issue](https://github.com/qiaodogbear/ChatTrace/issues/new/choose) 即可（模板会引导你提供
+微信版本、错误码与诊断信息）。**请注意：任何情况下都不要在 Issue 中粘贴主密钥或完整聊天明文**，
+密钥相关问题只需提供指纹前 8 位。
 
 ## 参考与致谢
 

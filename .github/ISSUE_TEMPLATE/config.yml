@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 📘 新手图文指南（先看这里）
+    url: https://github.com/qiaodogbear/ChatTrace/blob/main/docs/beginner_guide.md
+    about: 五步上手流程、FAQ、错误码对照表——多数使用问题在这里已有答案
+  - name: 🔐 隐私与合规说明
+    url: https://github.com/qiaodogbear/ChatTrace/blob/main/NOTICE.md
+    about: 数据流向、密钥保管方式、使用边界与法律提醒
+  - name: 🧩 媒体格式与解密细节
+    url: https://github.com/qiaodogbear/ChatTrace/blob/main/docs/media-format-notes.md
+    about: 图片 dat 三态、语音存放位置、消息与文件的关联方式（面向想深入了解的人）

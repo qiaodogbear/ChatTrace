@@ -1,0 +1,57 @@
+name: 💡 功能建议
+description: 提出新功能、格式支持或体验改进
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        提建议前，可以先看看 [README 的路线图](../blob/main/README.md#已知限制与路线图)——
+        有些方向（V2 图片运行时密钥、文件消息关联、SILK 转码、分析报告）已经在计划中。
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 你遇到的问题
+      description: 描述场景与痛点，而不是直接给方案——这样更容易评估
+      placeholder: |
+        例：我想把某个群三年的记录逐年归档，但现在只能整段导出，导出后还要手动切分。
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 期望的做法
+      placeholder: |
+        例：导出时支持按年份/月份切分为多个文件，文件名包含时间范围。
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: 涉及范围
+      options:
+        - 媒体（图片 / 语音 / 视频 / 文件）
+        - 导出格式（txt / json / html / 其它）
+        - 浏览与检索体验
+        - 密钥获取与解密
+        - 打包与安装
+        - 文档
+        - 其它
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 你考虑过的替代方案（可选）
+
+  - type: checkboxes
+    id: compliance
+    attributes:
+      label: 合规确认
+      options:
+        - label: 该建议仅面向「导出本人账号、本机数据」的用途，不涉及绕过平台限制或访问他人数据
+          required: true
