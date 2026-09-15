@@ -13,3 +13,6 @@ dist/
 *.keyinfo
 wx_password.bin
 *.log
+
+# reverse-engineering scratch space (may contain real account paths)
+.research_wx/

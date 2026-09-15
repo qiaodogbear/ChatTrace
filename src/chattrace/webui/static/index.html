@@ -656,7 +656,7 @@ function imageCard(m) {
   }
   const why = md.status === "missing"
     ? "原文件已被微信清理"
-    : (md.detail || "新版加密格式，离线无法解密");
+    : (md.detail || "该图片暂无法解码");
   return stubCard("🖼", "图片", info, why);
 }
 function videoCard(m) {

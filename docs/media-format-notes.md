@@ -1,7 +1,7 @@
-# 微信 4.x 聊天媒体格式与解密：实测结论（ChatTrace M3 笔记）
+# 微信 4.x 聊天媒体格式与解密：实测结论（ChatTrace 媒体笔记）
 
-> 环境：Windows 微信 **4.1.12.55**，真实账号数据（24–25 个加密库，已由 ChatTrace 解密）。
-> 本文是 ChatTrace 0.3.0 媒体导出功能的实现依据，也为后续"V2 图片运行时密钥"研究留档。
+> 环境：Windows 微信 **4.1.12.55 / 4.1.13.65**，真实账号数据（约 25 个加密库，已由 ChatTrace 解密）。
+> 本文是 ChatTrace 媒体导出与解码功能的实现依据；**V2 图片密钥已在 0.5.0 完整攻破并落地**（见 §2.2）。
 > 所有结论均在真实数据上验证过（样本量见各节）。
 
 ## 0. 消息体是 Zstandard 压缩的（M4 关键发现）
@@ -67,7 +67,7 @@
 | --- | --- | --- | --- |
 | 旧式 | 非 `07 08 56 3x 08 07` | **整文件单字节 XOR** | ✅ 可以 |
 | V1 | `07 08 56 31 08 07` | AES-128-ECB + 固定 key（`md5("0")` 相关）+ 尾部 XOR | ✅ 通常可以（本账号未见 V1） |
-| V2 | `07 08 56 32 08 07` | AES-128-ECB，密文自 offset 15 起 | ❌ 需运行时内存 key |
+| V2 | `07 08 56 32 08 07` | AES-128-ECB（密文自 offset 15 起）+ 尾部单字节 XOR | ✅ 可以（密钥由 `kvcomm code + wxid` 离线派生，见 §2.2） |
 
 ### 2.1 旧式 XOR：key 从图像魔数反推
 
@@ -83,27 +83,67 @@ key = data[0] ^ 0x89        # PNG
   （JPEG 头 XOR 0xA4 → `5b 7c 5b 44`；PNG 头 XOR 0xA4 → `2d f4 ea e3`，曾被误判为"未知格式"）。
 - 实测 4/4 解码为有效 JPEG（含 1080×1920 原图，PIL 校验通过）。
 
-### 2.2 V2：全账号共享 key，但只在进程内存
+### 2.2 V2：密钥可完全离线派生（0.5.0 攻破）
 
-- 两个**不同** V2 文件的 offset 15 起**前 16 字节密文完全相同** → 同一 key 加密同一 JPEG 明文模板
-  → **全账号共享一个 key**（不是每图独立）。
-- 该 key 与 DB 主密钥无派生关系：已实测 master key（32B）、`master[:16]`、hex-ASCII 变体、
-  `sha256/md5(master)`、`master ^ 0x3A`、`md5("0")` 系列全部试解失败。
-- AES 无实用已知明文攻击 → **离线不可解**；需在微信运行（查看过图片）时从进程内存提取
-  16/32 位 ASCII 候选，并用 `_t.dat[15:31]` 密文模板 AES 试解验证。
+V2 是"三段拼接"容器，分段长度写在文件头里：
+
+```
+[15B 头][AES-128-ECB 密文][单字节 XOR 尾部]
+
+头 := 07 08 "V2" 08 07 | u32le aes_size | u32le xor_size | 1B 占位
+```
+
+**最容易算错的一点**：AES 段按 PKCS7 补齐到 16 的整数倍，而 `aes_size` 本身已经是 16 的倍数时
+**仍会再多占一个块** —— 真实密文长度是 `aes_size + 16 - (aes_size % 16)`
+（本账号 `1024 → 1040`）。把多出来的这 16 字节误当成"明文段"，分段就会整体错位。
+
+**两把钥匙都能从本机文件推导，不需要微信在运行：**
+
+| 量 | 来源 | 本账号实测 |
+| --- | --- | --- |
+| `code` | `%APPDATA%\Tencent\xwechat\{ilink,net,net_1,net_2}\kvcomm\key_<code>_*.statistic` 的文件名 | `1234567` |
+| `xor_key` | `code & 0xFF` | `0xA4`（与旧式 XOR key 恰好一致） |
+| `aes_key` | `md5(f"{code}{wxid}").hexdigest()[:16]`，作为 16 字节 ASCII 使用 | `7afad634d235415a` |
+
+其中 `wxid` 取账号目录名去掉尾部数字后缀（`wxid_demo0000_1234` → `wxid_demo0000`）。
+**校验方式**：用候选 key 以 AES-ECB 解密任一 V2 文件 offset 15 起的 16 字节，明文应为图片魔术
+（`FF D8 FF E0/E1`、`89 50 4E 47`…）。不同 V2 文件的首块密文完全相同，正是因为它们的明文首块
+都是同一个 JPEG JFIF 头。机器上可能同时存在多个 `code`，因此必须逐个校验后才采用。
+
+- 与 DB 主密钥无派生关系（32B master、`master[:16]`、hex-ASCII、`sha256/md5(master)`、
+  `master ^ 0x3A`、`md5("0")` 系列全部试解失败）；也与消息 XML 里的 per-image `aeskey` 无关
+  （后者用于 CDN 传输，实测对本地 dat 无效）。
+- **不需要读进程内存**。曾对运行中的微信做全内存搜索（1.4 GB 可读写区 + 1.1 GB 全量区、
+  ASCII 与 UTF-16 两种编码的候选、16 字节对齐与逐字节暴力共 15 亿+ 次 AES 尝试）全部落空——
+  原因正是 key 根本不以明文常驻内存，而是每次由 `code` 现算。
 - 时间线：本账号 **2025-08 起出现 V2，2025-09 起全部为 V2**（9000 样本中 5126 个容器）。
+- **同一 md5 下并存三档文件**：`<md5>_h.dat`（高清原图，实测 4096×3072 / 8.8 MB）、
+  `<md5>.dat`（中图——消息 XML 的 `width`/`height`/`length` 描述的正是这一档）、
+  `<md5>_t.dat`（缩略图，对应 `cdnthumbwidth`/`cdnthumblength`）。
+  ChatTrace 按"原图优先"选择，并**测量被选中文件本身**的像素尺寸，避免"标注是缩略图尺寸、
+  显示的却是原图"这种自相矛盾。
+- **分段长度不固定**：实测 `aes_size` 恒为 1024（→ 1040 字节密文），而 `xor_size` 从 1.5 KB
+  到 1 MB 不等；两者之间是**未加密的明文中段**（大图可达数 MB）。
+- **闭环校验**：解密后明文的 MD5 与消息 XML 的 `<img md5>` 完全一致
+  （实测 `bd3cf890…`、`5b11e459…`、`83e922b0…` 三例全中），这是判断"关联与解密都对"的最硬证据。
+- 覆盖率（313 个 V2 文件样本）：**270 个直接解出完整 JPEG/PNG**，43 个是 WxAM（`wxgf`）原图；
+  ChatTrace 对后者自动回退到同图缩略图，用户仍能看到这张图。
 
 ## 3. 语音转码现状
 
 - `ffmpeg` **没有** SILK v3 解码器。
-- `pilk` 为 **GPL-3.0**（不能并入 MIT 项目，只能独立进程调用）；`kn007/silk-v3-decoder` 与 `sjzar/go-silk` 为 MIT。
-- ChatTrace 0.3.0 的策略：导出**原始 `.silk`**（保真留档），不内置转码器。
+- `pilk` 为 **GPL-3.0**，未采用（避免许可传染）；ChatTrace 使用 BSD-3-Clause 的
+  **silk-python（pysilk）** 在本地把 SILK v3 转成 WAV，界面与导出 HTML 里都是标准播放条（0.4.0 起）。
+- 语音本体在已解密库的 `media_*.db` → `VoiceInfo.voice_data`，按 `chat_name_id + local_id` 关联。
 
 ## 4. 复现命令
 
 ```powershell
-# 图片：解码单张 dat（XOR 0xA4）
+# 图片：解码单张旧式 dat（整文件 XOR 0xA4）
 python -c "d=open(r'<...>_W.dat','rb').read(); open('out.jpg','wb').write(bytes(b^0xA4 for b in d))"
+
+# 图片：解码单张 V2 dat（密钥 = md5(code + wxid)[:16]，XOR = code & 0xFF）
+python -c "import hashlib,struct;from Cryptodome.Cipher import AES;from Cryptodome.Util import Padding;code=1234567;wxid='wxid_demo';k=hashlib.md5(f'{code}{wxid}').hexdigest()[:16].encode();d=open(r'<...>_t.dat','rb').read();_,a,x=struct.unpack_from('<6sLL',d);n=a+16-a%16;p=Padding.unpad(AES.new(k,AES.MODE_ECB).decrypt(d[15:15+n]),16);open('out.jpg','wb').write(p+d[15+n:len(d)-x]+bytes(b^(code&0xFF) for b in d[-x:]))"
 
 # 语音：从已解密库导出某条语音
 python -c "import sqlite3;c=sqlite3.connect(r'<dec>\message\media_0.db');b=c.execute('select voice_data from VoiceInfo where chat_name_id=? and local_id=?',(2,9302)).fetchone()[0];open('v.silk','wb').write(b)"

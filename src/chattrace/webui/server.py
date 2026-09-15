@@ -228,6 +228,19 @@ def _media_for_account(account: Account) -> MediaService | None:
     return svc
 
 
+def _image_key_state(account) -> dict:
+    """V2 image-key status for /api/state; never raises."""
+    if account is None:
+        return {"status": "unavailable", "reason": "未选择账号"}
+    try:
+        svc = _media_for_account(account)
+        if svc is None:
+            return {"status": "unavailable", "reason": "数据库尚未解密"}
+        return svc.image_key_status()
+    except Exception as exc:  # pragma: no cover - defensive
+        return {"status": "unavailable", "reason": f"解析失败: {exc}"}
+
+
 # ------------------------------------------------------------------ request
 class ChatTraceHandler(BaseHTTPRequestHandler):
     server_version = "ChatTrace/0.1"
@@ -371,6 +384,7 @@ class ChatTraceHandler(BaseHTTPRequestHandler):
             "app_dir": str(config.app_data_dir()),
             "capabilities": {
                 "voice_playback": voice_service.decoder_available(),
+                "v2_images": _image_key_state(account),
             },
         }
 

@@ -8,9 +8,12 @@ Decoding knowledge (empirically verified against a real 4.1.12.55 account):
         PNG) -> key is derived per magic; we auto-derive from the first bytes.
       - V1 (magic b"\\x07\\x08\\x56\\x31\\x08\\x07"): AES-128-ECB with the fixed
         key md5(b"0") (16 raw bytes) mixed with trailing XOR.
-      - V2 (magic b"\\x07\\x08\\x56\\x32\\x08\\x07"): AES-128-ECB with one
-        per-account key that only exists in the running WeChat process memory
-        (not derivable offline) -> surfaced as "unsupported".
+      - V2 (magic b"\\x07\\x08\\x56\\x32\\x08\\x07"): AES-128-ECB over the first
+        ``aes_size`` bytes (PKCS7 padded to a block boundary) followed by a
+        single-byte-XOR trailer.  Both keys are derived *offline* from the
+        kvcomm code and the account wxid -- see .image_key -- so these images
+        decode without touching the running client.  Payloads that turn out to
+        be WxAM ("wxgf") still need a HEVC decoder and stay "unsupported".
   * msg/video/<yyyy-MM>/<md5>.mp4 + <md5>_thumb.jpg -- plaintext (no decryption).
   * decrypted/message/media_*.db  VoiceInfo(chat_name_id, create_time, local_id,
     svr_id, voice_data, data_index) -- voice payloads (SILK v3) stored in the
@@ -33,10 +36,17 @@ from pathlib import Path
 from typing import Iterable, Iterator
 
 from .database import DatabaseService, message_base_type
+from .image_key import (
+    V2_HEADER_SIZE,
+    V2_MAGIC,
+    ImageKeyResolver,
+    ImageKeys,
+    decode_v2,
+    image_format_of,
+)
 from .payload import parse_payload
 
 V1_MAGIC = bytes.fromhex("070856310807")
-V2_MAGIC = bytes.fromhex("070856320807")
 _V1_AES_KEY_CANDIDATES = (
     hashlib.md5(b"0").digest(),              # 16 raw bytes
     hashlib.md5(b"0").hexdigest()[:16].encode("ascii"),  # 'cfcd208495d565ef'
@@ -52,6 +62,53 @@ _IMAGE_KIND = ("image", 3)
 _VIDEO_KIND = ("video", 43)
 _VOICE_KIND = ("voice", 34)
 _VOICE_KIND_ALT = ("voice", 50)
+
+#: JPEG Start-Of-Frame markers carry the real pixel dimensions.
+_SOF_MARKERS = frozenset((0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB))
+#: Enough plaintext to walk past a typical Exif/APP1 segment and reach the SOF.
+#: Phone photos can stack Exif + ICC + APP3 segments; retry with a wider window
+#: instead of paying the larger read for every image.
+_DIMENSION_PROBE_LIMITS = (64 * 1024, 512 * 1024)
+
+
+def _jpeg_dimensions(buf: bytes) -> tuple[int, int] | None:
+    """Walk JPEG segments to the Start-Of-Frame marker."""
+    index = 2
+    end = len(buf) - 9
+    while index < end:
+        if buf[index] != 0xFF:
+            index += 1
+            continue
+        marker = buf[index + 1]
+        if marker in _SOF_MARKERS:
+            height = (buf[index + 5] << 8) | buf[index + 6]
+            width = (buf[index + 7] << 8) | buf[index + 8]
+            return (width, height) if width and height else None
+        if marker in (0xD8, 0x01) or 0xD0 <= marker <= 0xD7:
+            index += 2
+            continue
+        if index + 4 > len(buf):
+            break
+        segment = (buf[index + 2] << 8) | buf[index + 3]
+        if segment < 2:
+            return None
+        index += 2 + segment
+    return None
+
+
+def image_dimensions(blob: bytes) -> tuple[int, int] | None:
+    """Pixel size of a *decoded* image payload (jpg / png / gif)."""
+    if blob[:3] == b"\xff\xd8\xff":
+        return _jpeg_dimensions(blob)
+    if blob[:8] == b"\x89PNG\r\n\x1a\n" and len(blob) >= 24:
+        width = int.from_bytes(blob[16:20], "big")
+        height = int.from_bytes(blob[20:24], "big")
+        return (width, height) if width and height else None
+    if blob[:6] in (b"GIF87a", b"GIF89a") and len(blob) >= 10:
+        width = int.from_bytes(blob[6:8], "little")
+        height = int.from_bytes(blob[8:10], "little")
+        return (width, height) if width and height else None
+    return None
 
 
 class MediaError(RuntimeError):
@@ -71,6 +128,8 @@ class MediaItem:
     detail: str = ""
     size: int = 0
     is_thumbnail: bool = False
+    alternates: tuple[Path, ...] = ()   # lower-priority dat candidates (e.g. thumbnail)
+    dimensions: tuple[int, int] | None = None   # real pixel size of the chosen file
 
 
 # ------------------------------------------------------------------ helpers
@@ -91,6 +150,17 @@ def md5_hex32(packed: object) -> str | None:
     return match.group(0).decode("ascii") if match else None
 
 
+def data_key_for(data: bytes) -> int | None:
+    """Single-byte XOR key implied by the leading image magic, if any."""
+    for _fmt, (magic, first) in _IMAGE_MAGICS.items():
+        if len(magic) > len(data):
+            continue
+        key = data[0] ^ first
+        if all((data[i] ^ key) == magic[i] for i in range(len(magic))):
+            return key
+    return None
+
+
 def classify_dat(data: bytes) -> str:
     """'xor' | 'v1' | 'v2' | 'unknown'"""
     head = data[:6]
@@ -100,33 +170,23 @@ def classify_dat(data: bytes) -> str:
         return "v1"
     if len(data) < 4:
         return "unknown"
-    # legacy xor: derive key from the magic we expect afterwards
-    for _fmt, (magic, first) in _IMAGE_MAGICS.items():
-        if len(magic) > len(data):
-            continue
-        key = data[0] ^ first
-        if all((data[i] ^ key) == magic[i] for i in range(len(magic))):
-            return "xor"
-    return "unknown"
+    return "xor" if data_key_for(data) is not None else "unknown"
 
 
-def decode_dat(data: bytes) -> tuple[str, bytes]:
+def decode_dat(data: bytes, keys: ImageKeys | None = None) -> tuple[str, bytes]:
     """Decode one .dat payload -> (extension, image bytes).
 
-    Raises MediaUnsupported for V2 (runtime key only) and unknown layouts,
+    ``keys`` carries the kvcomm-derived V2 key set; without it V2 payloads stay
+    unsupported.  Raises MediaUnsupported for layouts we cannot decode and
     MediaError for corrupt data.
     """
     cls = classify_dat(data)
     if cls == "xor":
-        # derive the single-byte key from each plausible image magic and verify
-        for fmt, (magic, first) in _IMAGE_MAGICS.items():
-            key = data[0] ^ first
-            if len(magic) > len(data):
-                continue
-            if all((data[i] ^ key) == magic[i] for i in range(len(magic))):
-                out = bytes(b ^ key for b in data)
-                return fmt, out
-        raise MediaError("legacy dat xor decode produced no known image magic")
+        key = data_key_for(data)
+        if key is None:
+            raise MediaError("legacy dat xor decode produced no known image magic")
+        plain = bytes(b ^ key for b in data)
+        return image_format_of(plain) or "jpg", plain
     if cls == "v1":
         from Cryptodome.Cipher import AES
 
@@ -145,9 +205,18 @@ def decode_dat(data: bytes) -> tuple[str, bytes]:
                 return "png", dec
         raise MediaUnsupported(f"v1 image needs key validation (raw error: {last_error})")
     if cls == "v2":
-        raise MediaUnsupported(
-            "v2 加密图片需要微信运行时密钥（暂不支持离线导出）"
-        )
+        if keys is None:
+            raise MediaUnsupported("V2 加密图片需要 kvcomm 派生的密钥（本机未解析到）")
+        try:
+            plain = decode_v2(data, keys)
+        except ValueError as exc:
+            raise MediaError(f"V2 解密失败: {exc}") from exc
+        kind = image_format_of(plain)
+        if kind is None:
+            raise MediaUnsupported("V2 解密结果不是已知图片格式")
+        if kind == "wxgf":
+            raise MediaUnsupported("WxAM 压缩图片（需要 HEVC 解码器）")
+        return kind, plain
     raise MediaUnsupported("unknown .dat layout (not xor / v1 / v2)")
 
 
@@ -169,6 +238,7 @@ class MediaService:
         account_dir: Path,
         decrypted_dir: Path,
         cache_dir: Path | None = None,
+        image_key_resolver: ImageKeyResolver | None = None,
     ) -> None:
         self.account_id = account_id
         self.account_dir = Path(account_dir)      # xwechat_files/<account>
@@ -177,6 +247,7 @@ class MediaService:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self._media_name2id: dict[Path, dict[str, int]] | None = None
         self._locate_stats: dict[str, int] = {}
+        self._image_key_resolver = image_key_resolver
 
     # ------------------------------------------------------------ image path
     def _attach_root(self, username: str) -> Path:
@@ -212,6 +283,104 @@ class MediaService:
         )
         return hits
 
+    # ----------------------------------------------------------- image keys
+    def image_keys(self) -> ImageKeys | None:
+        """kvcomm-derived V2 key set for this account (cached; may be None)."""
+        if self._image_key_resolver is None:
+            self._image_key_resolver = ImageKeyResolver(self.account_dir, self.account_id)
+        return self._image_key_resolver.keys()
+
+    def image_key_status(self) -> dict[str, object]:
+        """Diagnostics for /api/state: whether V2 images can be decoded."""
+        if self._image_key_resolver is None:
+            self._image_key_resolver = ImageKeyResolver(self.account_dir, self.account_id)
+        return self._image_key_resolver.describe()
+
+    def _plaintext_head(self, path: Path, keys: ImageKeys | None, limit: int) -> bytes:
+        """First ~``limit`` plaintext bytes of one dat candidate.
+
+        Only the needed prefix is read, so a 9 MB original costs one 64 KB read:
+        V2 keeps its ciphertext in the first ``aes_size`` bytes and the rest of
+        the file is already plaintext.
+        """
+        import struct
+
+        try:
+            with open(path, "rb") as handle:
+                blob = handle.read(limit + V2_HEADER_SIZE + 1088)
+        except OSError:
+            return b""
+        cls = classify_dat(blob)
+        if cls == "v2":
+            if keys is None or len(blob) < V2_HEADER_SIZE + 16:
+                return b""
+            try:
+                _, aes_size, _xor_size = struct.unpack_from("<6sLL", blob)
+            except struct.error:  # pragma: no cover - guarded by the length check
+                return b""
+            if aes_size <= 0:
+                return b""
+            aligned = aes_size + 16 - (aes_size % 16)
+            if V2_HEADER_SIZE + aligned > len(blob):
+                return b""
+            from Cryptodome.Cipher import AES
+            from Cryptodome.Util import Padding
+
+            head = AES.new(keys.aes_key[:16], AES.MODE_ECB).decrypt(
+                blob[V2_HEADER_SIZE : V2_HEADER_SIZE + aligned]
+            )
+            # The AES segment is PKCS7 padded, so it must be stripped before the
+            # plaintext middle section is appended -- otherwise everything after
+            # the first block boundary shifts by the padding length.
+            try:
+                head = Padding.unpad(head, 16)
+            except ValueError:
+                pass
+            return head + blob[V2_HEADER_SIZE + aligned : limit]
+        if cls == "xor":
+            key = data_key_for(blob)
+            return bytes(b ^ key for b in blob[:limit]) if key is not None else b""
+        return b""
+
+    def _probe_image_dat(self, path: Path, keys: ImageKeys | None) -> tuple[str, str]:
+        """Read only the header block of one dat candidate -> (status, kind).
+
+        status: ``ok`` | ``locked`` | ``wxam`` | ``missing`` | ``unknown``
+        """
+        try:
+            with open(path, "rb") as handle:
+                head = handle.read(V2_HEADER_SIZE + 32)
+        except OSError:
+            return "missing", ""
+        cls = classify_dat(head)
+        if cls == "v2":
+            if keys is None:
+                return "locked", ""
+            from Cryptodome.Cipher import AES
+
+            block = head[V2_HEADER_SIZE : V2_HEADER_SIZE + 16]
+            if len(block) < 16:
+                return "unknown", ""
+            try:
+                plain = AES.new(keys.aes_key[:16], AES.MODE_ECB).decrypt(block)
+            except (ValueError, TypeError):  # pragma: no cover
+                return "unknown", ""
+            kind = image_format_of(plain)
+            if kind is None:
+                return "unknown", ""
+            return ("wxam", "wxgf") if kind == "wxgf" else ("ok", kind)
+        if cls == "xor":
+            return "ok", "jpg"
+        if cls == "v1":
+            return "locked", ""
+        return "unknown", ""
+
+    _IMAGE_FALLBACK_DETAIL = {
+        "locked": "新版加密图片（V2），本机未解析到 kvcomm 密钥",
+        "wxam": "WxAM 压缩图片，需要 HEVC 解码器",
+        "missing": "图片文件已被微信清理",
+    }
+
     def image_item(self, username: str, md5: str, create_time: int) -> MediaItem:
         if not md5:
             return MediaItem(kind="image", status="no-md5", ref="", detail="消息未携带图片指纹")
@@ -221,28 +390,44 @@ class MediaService:
                 kind="image", status="missing", ref=md5,
                 detail="磁盘上不存在该图片（可能已被微信清理）",
             )
-        path = cands[0]
+
+        keys = self.image_keys()
+        chosen: Path | None = None
+        fallback = ("unsupported", "unknown")
+        alternates: list[Path] = []
+        for path in cands:
+            status, kind = self._probe_image_dat(path, keys)
+            if status == "ok" and chosen is None:
+                chosen = path
+                continue
+            alternates.append(path)
+            if fallback[0] == "unsupported" and status != "ok":
+                fallback = (status, kind)
+
+        if chosen is None:
+            detail = self._IMAGE_FALLBACK_DETAIL.get(fallback[0], "未知图片格式")
+            return MediaItem(
+                kind="image", status="unsupported", ref=md5,
+                disk_path=cands[0], detail=detail,
+            )
         try:
-            head = path.read_bytes()[:6]
+            size = chosen.stat().st_size
         except OSError:
-            return MediaItem(kind="image", status="missing", ref=md5, detail="文件不可读")
-        cls = classify_dat(head + b"\x00" * (6 - len(head))) if len(head) < 6 else classify_dat(head)
-        if cls == "v2":
-            return MediaItem(
-                kind="image", status="unsupported", ref=md5, disk_path=path,
-                detail="2025-08 之后的新版加密图片（V2），离线无法解密",
-            )
-        if cls == "v1":
-            return MediaItem(
-                kind="image", status="unsupported", ref=md5, disk_path=path,
-                detail="V1 加密图片（需在线提取密钥）",
-            )
-        if cls == "unknown":
-            return MediaItem(kind="image", status="unsupported", ref=md5, disk_path=path, detail="未知图片格式")
+            size = 0
+        # Report the size of the file we actually picked: WeChat keeps several
+        # renditions under one md5 (``_h`` original, plain mid-size, ``_t``
+        # thumbnail) and the message XML only describes one of them.
+        dimensions = None
+        for probe_limit in _DIMENSION_PROBE_LIMITS:
+            dimensions = image_dimensions(self._plaintext_head(chosen, keys, probe_limit))
+            if dimensions:
+                break
         return MediaItem(
-            kind="image", status="ok", ref=md5, disk_path=path,
-            detail=path.name, size=path.stat().st_size,
-            is_thumbnail="_t" in path.stem,
+            kind="image", status="ok", ref=md5, disk_path=chosen,
+            detail=chosen.name, size=size,
+            is_thumbnail="_t" in chosen.stem or "_s" in chosen.stem,
+            alternates=tuple(alternates),
+            dimensions=dimensions,
         )
 
     # -------------------------------------------------------------- voice
@@ -421,11 +606,26 @@ class MediaService:
         return _enrich(item, meta)
 
     def decode_image(self, item: MediaItem) -> tuple[str, bytes] | None:
-        """Decode an ok image_item to (ext, image bytes); raises on corrupt."""
+        """Decode an ok image_item to (ext, image bytes); None when undecodable.
+
+        Candidates are tried best-first, so an original that only holds a WxAM
+        payload silently falls back to the still-displayable thumbnail.
+        """
         if item.status != "ok" or item.disk_path is None:
             return None
-        data = item.disk_path.read_bytes()
-        return decode_dat(data)
+        keys = self.image_keys()
+        for path in (item.disk_path, *item.alternates):
+            try:
+                data = path.read_bytes()
+            except OSError:
+                continue
+            try:
+                return decode_dat(data, keys)
+            except MediaError:
+                continue
+            except Exception:  # pragma: no cover - defensive
+                continue
+        return None
 
 
 def _packed_from_raw(db: DatabaseService, username: str, local_id: int):
@@ -488,9 +688,13 @@ def _enrich(item: MediaItem, meta: dict) -> MediaItem:
         elif item.status == "missing":
             detail = f"语音 {label}（本机缓存已过期，无法播放）" if label else "语音缓存已过期"
     elif item.kind == "image":
-        extra = " · ".join(x for x in (dims, size) if x)
+        # Prefer the measured file over the message XML: the XML describes
+        # whichever rendition the sender uploaded, not the one on this disk.
+        real_dims = f"{item.dimensions[0]}×{item.dimensions[1]}" if item.dimensions else dims
+        real_size = _fmt_size(item.size) or size
+        extra = " · ".join(x for x in (real_dims, real_size) if x)
         if item.status == "unsupported":
-            detail = f"{extra} · 新版加密格式，离线无法解密" if extra else item.detail
+            detail = f"{item.detail} · {extra}" if extra else item.detail
         elif item.status == "missing":
             detail = f"{extra}（原文件已被微信清理）" if extra else item.detail
         elif item.status == "ok" and extra:
