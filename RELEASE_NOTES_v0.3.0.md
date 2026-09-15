@@ -27,6 +27,10 @@
 ## 系统要求
 - Windows 10/11，微信 4.1.11+，已用 0.2.0+ 流程完成密钥获取与解密
 
+## 下载与校验
+- 资产：`ChatTrace-0.3.0-win64.zip`（53.2 MB / 55,803,946 字节；解压后双击 `ChatTrace.exe`）
+- SHA-256：`8e243c98363e11e9fbbdf07c23e96c4592e049ed486d83af7b32496ac3dd9bda`
+
 ## 许可与合规
 - MIT License · Copyright (c) 2026 Qiao Xinliang (qiaodogbear)
 - 仅用于导出本人账号、本机聊天数据；非官方工具，与腾讯/微信无关联；无云端/网络上报
