@@ -9,6 +9,8 @@ ChatTrace 以 **MIT License** 开源（见 [LICENSE](LICENSE)）。本仓库自�
 | --- | --- | --- | --- |
 | **frida / frida-tools** | 附加到本机 WeChat 进程、注入 KeyAgent 脚本捕获内存密钥 | frida 核心 **LGPL-2.1-or-later**；frida python 绑定 **MIT** | https://github.com/frida/frida |
 | **pycryptodomex** | AES-CBC / PBKDF2 解密微信 SQLCipher 数据库 | 公有领域 (Public Domain) + BSD-2-Clause | https://github.com/Legrandin/pycryptodome |
+| **zstandard** | 解压 Zstandard 压缩的消息体（`WCDB_CT_message_content = 4`） | BSD-3-Clause | https://github.com/indygreg/python-zstandard |
+| **silk-python**（提供 `pysilk` 模块） | 将微信语音 SILK v3 解码为 PCM/WAV，用于界面内播放 | BSD-3-Clause | https://github.com/synodriver/pysilk |
 | **PyInstaller**（仅构建期） | 打包为免安装 exe | GPL-2.0-or-later（含 bootloader 例外条款） | https://github.com/pyinstaller/pyinstaller |
 
 - **frida（LGPL-2.1）**：ChatTrace 将其作为独立、未修改的第三方组件随发行包分发。
@@ -16,7 +18,12 @@ ChatTrace 以 **MIT License** 开源（见 [LICENSE](LICENSE)）。本仓库自�
   frida 的 LGPL-2.1 许可文本，并可于上述上游获取其对应源码（本发行包不包含对
   frida 的任何修改）。
 - **pycryptodomex**：版权所有者已将该库贡献至公有领域并按 BSD 双许可发布。
+- **zstandard / silk-python**：均为 BSD-3-Clause，与 MIT 兼容，可随发行包再分发；
+  语音解码仅用于把本人账号的语音转成通用可播放格式。
 - **PyInstaller 产物**：PyInstaller 的 bootloader 例外使打包产物不受 GPL 传染。
+
+> 注：早期社区常用的 `pilk`（SILK 绑定）为 **GPL-3.0**，本项目**未采用**；
+> 改用 BSD 许可的 `silk-python` 以避免许可传染。
 
 ## 参考实现与致谢（参考其公开方法/数据库语义，本仓库代码独立编写）
 

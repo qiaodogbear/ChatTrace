@@ -4,6 +4,36 @@
 > 本文是 ChatTrace 0.3.0 媒体导出功能的实现依据，也为后续"V2 图片运行时密钥"研究留档。
 > 所有结论均在真实数据上验证过（样本量见各节）。
 
+## 0. 消息体是 Zstandard 压缩的（M4 关键发现）
+
+绝大多数富媒体消息的 `message_content` **不是文本**，而是 Zstandard 压缩帧
+（魔数 `28 b5 2f fd`，`WCDB_CT_message_content = 4` 标记压缩；旧行 `= 0` 为纯文本）。
+`source` 列几乎总是压缩（`WCDB_CT_source = 4`，实测 463,463 行）。
+
+把它当字符串读 → 满屏 `\ufffd` 乱码（这正是早期版本"乱码/错位"的根因）。
+解压之后是一份完整 XML，媒体元数据都在里面：
+
+| 类型 | 根元素 | 可用字段 |
+| --- | --- | --- |
+| 图片 | `<img>` | `md5`（原图 md5，**与本地文件名不同**）、`aeskey`、`length`、`cdnthumbwidth/height`、`encryver` |
+| 语音 | `<voicemsg>` | `voicelength`（毫秒）、`length`、`aeskey`、`voiceformat` |
+| 视频 | `<videomsg>` | `md5`、`aeskey`、`length`、`playlength`（秒）、缩略图尺寸 |
+| 文件/链接/引用/小程序 | `<appmsg><type>N</type>` | `title`、`des`、`url`、`md5`、`fileext`；`type=57` 为引用，内含 `<refermsg>`（`fromusr`/`chatusr`/`content` 是**子元素**不是属性） |
+| 位置 | `<location>` | `x`/`y`（经纬度）、`poiname`、`cityname` |
+| 语音通话 | `<voipinvitemsg>` + `<voiplocalinfo>` | `diaplay_content`（如"通话时长 01:20"） |
+| 名片 | `<msg … username nickname …>` | `nickname`、`username`、`alias` |
+| 表情 | `<emoji>` | `md5`、`len`、`cdnurl`（本地通常无缓存文件） |
+
+群聊文本消息还带发送者前缀：`<发送者wxid>:\n<内容>`——比 `Name2Id` 映射更可靠。
+
+## 0.1 Name2Id 的 rowid 是分片内局部的
+
+同一个 username 在不同 shard 里 rowid 完全不同（实测：`message_1.db` 里 rowid=1051、
+`message_2.db` 里 rowid=11、`message_3.db` 里 rowid=386）。把各分片的 `Name2Id`
+合并成一张表去解析 `real_sender_id` 会让**人名与消息内容错位**。
+正确做法：用行所属分片自己的 `Name2Id`。发送者优先级：
+群前缀 → 本分片 Name2Id → `status == 2` 启发式。
+
 ## 1. 消息 → 磁盘文件：关联键
 
 | 媒体 | 磁盘位置 | 关联方式 |
