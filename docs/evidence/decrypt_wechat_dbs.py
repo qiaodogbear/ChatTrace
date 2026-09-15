@@ -10,8 +10,9 @@ from pathlib import Path
 
 from Cryptodome.Cipher import AES
 
-ACCOUNT = "wxid_demo0000_1234"
-SRC = Path(r"D:\Users\demo\Documents\xwechat_files") / ACCOUNT / "db_storage"
+ACCOUNT = os.environ.get("CHATTRACE_ACCOUNT", "wxid_demo0000_1234")
+WECHAT_ROOT = Path(os.environ.get("CHATTRACE_WECHAT_ROOT", r"D:\Users\demo\Documents\xwechat_files"))
+SRC = WECHAT_ROOT / ACCOUNT / "db_storage"
 OUT = Path(os.environ["TEMP"]) / "chatlog-verify-out" / ACCOUNT / "decrypted"
 PAGE = 4096
 RESERVE = 80

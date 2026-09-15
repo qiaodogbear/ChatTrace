@@ -17,9 +17,10 @@ from chattrace.service.media import (
     image_dimensions,
 )
 
+# Synthetic key material -- derivation is covered in tests/test_image_key.py.
 AES_KEY = b"7afad634d235415a"
 V2_MAGIC = bytes.fromhex("070856320807")
-XOR_KEY = 0xA4
+XOR_KEY = 0x87
 MONTH_CT = 1767225600  # 2026-01-01
 
 

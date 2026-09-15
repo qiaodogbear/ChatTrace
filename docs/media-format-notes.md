@@ -99,13 +99,15 @@ V2 是"三段拼接"容器，分段长度写在文件头里：
 
 **两把钥匙都能从本机文件推导，不需要微信在运行：**
 
-| 量 | 来源 | 本账号实测 |
+| 量 | 来源 | 示例（合成） |
 | --- | --- | --- |
-| `code` | `%APPDATA%\Tencent\xwechat\{ilink,net,net_1,net_2}\kvcomm\key_<code>_*.statistic` 的文件名 | `1234567` |
-| `xor_key` | `code & 0xFF` | `0xA4`（与旧式 XOR key 恰好一致） |
+| `code` | `%APPDATA%\Tencent\xwechat\*\kvcomm\key_<code>_*.statistic` 的文件名 | `1234567` |
+| `xor_key` | `code & 0xFF` | `0x87` |
 | `aes_key` | `md5(f"{code}{wxid}").hexdigest()[:16]`，作为 16 字节 ASCII 使用 | `7afad634d235415a` |
 
 其中 `wxid` 取账号目录名去掉尾部数字后缀（`wxid_demo0000_1234` → `wxid_demo0000`）。
+**上表是合成的演示值**：真实账号的 `code` 与派生密钥不写入仓库——两者结合即可解密该账号的全部图片。
+本机实测的 `xor_key` 与旧式图片的 XOR key 恰好一致（同一账号下两者相同）。
 **校验方式**：用候选 key 以 AES-ECB 解密任一 V2 文件 offset 15 起的 16 字节，明文应为图片魔术
 （`FF D8 FF E0/E1`、`89 50 4E 47`…）。不同 V2 文件的首块密文完全相同，正是因为它们的明文首块
 都是同一个 JPEG JFIF 头。机器上可能同时存在多个 `code`，因此必须逐个校验后才采用。
@@ -143,7 +145,7 @@ V2 是"三段拼接"容器，分段长度写在文件头里：
 python -c "d=open(r'<...>_W.dat','rb').read(); open('out.jpg','wb').write(bytes(b^0xA4 for b in d))"
 
 # 图片：解码单张 V2 dat（密钥 = md5(code + wxid)[:16]，XOR = code & 0xFF）
-python -c "import hashlib,struct;from Cryptodome.Cipher import AES;from Cryptodome.Util import Padding;code=1234567;wxid='wxid_demo';k=hashlib.md5(f'{code}{wxid}').hexdigest()[:16].encode();d=open(r'<...>_t.dat','rb').read();_,a,x=struct.unpack_from('<6sLL',d);n=a+16-a%16;p=Padding.unpad(AES.new(k,AES.MODE_ECB).decrypt(d[15:15+n]),16);open('out.jpg','wb').write(p+d[15+n:len(d)-x]+bytes(b^(code&0xFF) for b in d[-x:]))"
+python -c "import hashlib,struct;from Cryptodome.Cipher import AES;from Cryptodome.Util import Padding;code=1234567;wxid='wxid_demo0000';k=hashlib.md5(f'{code}{wxid}').hexdigest()[:16].encode();d=open(r'<...>_t.dat','rb').read();_,a,x=struct.unpack_from('<6sLL',d);n=a+16-a%16;p=Padding.unpad(AES.new(k,AES.MODE_ECB).decrypt(d[15:15+n]),16);open('out.jpg','wb').write(p+d[15+n:len(d)-x]+bytes(b^(code&0xFF) for b in d[-x:]))"
 
 # 语音：从已解密库导出某条语音
 python -c "import sqlite3;c=sqlite3.connect(r'<dec>\message\media_0.db');b=c.execute('select voice_data from VoiceInfo where chat_name_id=? and local_id=?',(2,9302)).fetchone()[0];open('v.silk','wb').write(b)"

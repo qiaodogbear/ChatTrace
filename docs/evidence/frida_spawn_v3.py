@@ -10,8 +10,11 @@ from pathlib import Path
 
 import frida
 
-WEIXIN_EXE = r"C:\Program Files\Weixin\Weixin.exe"
-MSG0_DB = r"D:\Users\demo\Documents\xwechat_files\wxid_demo0000_1234\db_storage\message\message_0.db"
+WEIXIN_EXE = os.environ.get("CHATTRACE_WEIXIN_EXE", r"C:\Program Files\Weixin\Weixin.exe")
+MSG0_DB = os.environ.get(
+    "CHATTRACE_MSG0_DB",
+    r"D:\Users\demo\Documents\xwechat_files\wxid_demo0000_1234\db_storage\message\message_0.db",
+)
 ENTRY_A = 0x353BC60
 ANCHOR_A = 0x353BC99
 ANCHOR_B = 0x7050502
