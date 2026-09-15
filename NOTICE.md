@@ -34,9 +34,15 @@ ChatTrace 以 **MIT License** 开源（见 [LICENSE](LICENSE)）。本仓库自�
 | **Frida** 官方文档与示例 | KeyAgent 注入与脚本基础设施 | LGPL-2.1 / Apache-2.0 (docs) |
 | **WeChatDaily**（Bryan-Cyf） | M3 媒体：SILK 语音链路与 macOS 图片 key 思路的**格式确认**（macOS 公式不适用于 Windows，代码未采用） | MIT |
 | **xlight/chatlog** | M3 媒体：4.x 图片容器三态与"视频明文"的行为佐证 | Apache-2.0 |
+| **WeChatDataAnalysis**（LifeArchiveProject） | M5 媒体：V2 容器密钥派生关系（`code` + `wxid` → AES/XOR）的公开披露来源。该项目**未声明开源许可证**，故本项目**只采用其披露的算法事实**，未引用其任何代码或资源 | 未声明 |
 
 > M3 图片 dat 解密（单字节 XOR 反推等）由 ChatTrace 依据文件头与
 > JPEG/PNG/GIF 魔数**独立推导并在真实数据上验证**，未包含上述参考项目代码。
+>
+> M5 V2 容器：**密钥派生关系**（`code` 取自 kvcomm 缓存文件名，`xor_key = code & 0xFF`，
+> `aes_key = md5(code + wxid)[:16]`）来自上述社区公开研究，属于微信格式的客观规律（事实性知识）；
+> ChatTrace 的实现、校验流程与全部代码均独立编写，并在真实账号上做了闭环验证
+> （解密后明文的 MD5 与消息 XML 的 `<img md5>` 完全一致）。未复制任何参考项目代码。
 
 ## 法律与合规提醒
 

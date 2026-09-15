@@ -11,5 +11,9 @@ from chattrace.webui.server import main
 
 if __name__ == "__main__":
     # keep a console open so the URL stays visible and the user can close it
-    argv = [] if len(sys.argv) <= 1 else sys.argv[1:]
+    argv = list(sys.argv[1:])
+    # Tolerate the CLI spelling too: ``ChatTrace.exe webui --port 8801`` and
+    # ``ChatTrace.exe --port 8801`` both mean "start the guided Web UI".
+    if argv and argv[0] == "webui":
+        argv = argv[1:]
     sys.exit(main(argv))
