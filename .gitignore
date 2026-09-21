@@ -16,3 +16,6 @@ wx_password.bin
 
 # reverse-engineering scratch space (may contain real account paths)
 .research_wx/
+
+# machine-local operating guide (contains the real account id and paths)
+AGENT_GUIDE.md

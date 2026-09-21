@@ -128,7 +128,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--chat", required=True,
                     help="Group/contact display name (substring) or an exact username")
     ap.add_argument("--out-dir", default=None,
-                    help="Where exports and .state/ live (default: <account>/exports/poll)")
+                    help="Where exports and .state/ live "
+                         "(default: %LOCALAPPDATA%\\ChatTrace\\accounts\\<account>\\poll)")
     ap.add_argument("--format", default="json", choices=("json", "txt", "html"),
                     help="Export format; incremental mode requires json (default)")
     ap.add_argument("--media", action="store_true", help="Annotate/emit media too")
@@ -148,7 +149,11 @@ def main(argv: list[str] | None = None) -> int:
         if not args.quiet:
             print(msg, file=sys.stderr, flush=True)
 
-    out_dir = Path(args.out_dir).expanduser() if args.out_dir else account_dir.parent / "_poll" / account_id
+    # Never default into the WeChat data tree: the whole toolchain promises to
+    # leave <xwechat_files> strictly read-only.
+    default_root = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "ChatTrace"
+    out_dir = (Path(args.out_dir).expanduser() if args.out_dir
+               else default_root / "accounts" / account_id / "poll")
     state_path = out_dir / ".state" / f"{_slug(args.chat)}.json"
     state = _load_state(state_path)
 
