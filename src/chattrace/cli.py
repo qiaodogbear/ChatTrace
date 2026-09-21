@@ -98,6 +98,9 @@ def build_parser() -> argparse.ArgumentParser:
     exp.add_argument("--media", action="store_true",
                      help="Include media: HTML writes an <xxx>_assets folder with images/voices/videos; "
                           "txt/json annotate each media message with availability.")
+    exp.add_argument("--since", default=None,
+                     help="Incremental cursor 'create_time,local_id' (exclusive): export only messages "
+                          "newer than it. JSON output echoes the next cursor as meta.next_since.")
 
     web = sub.add_parser("webui", help="Launch the guided Web UI (opens the browser).")
     web.add_argument("--host", default="127.0.0.1")
@@ -469,12 +472,26 @@ def _resolve_chat_username(db: DatabaseService, user: str | None, query: str) ->
     raise KeyagentError(8, "need --user or --query")
 
 
+def _parse_cursor(value: str | None, flag: str) -> tuple[int, int] | None:
+    """Parse a 'create_time,local_id' keyset cursor from the CLI."""
+    if not value:
+        return None
+    try:
+        ct_s, lid_s = value.split(",")
+        return (int(ct_s), int(lid_s))
+    except ValueError:
+        print(f"error: {flag} must look like '1720000000,123'", file=sys.stderr)
+        raise SystemExit(9)
+
+
 def cmd_export(args) -> int:
     account, db = _open_db(args)
     username = _resolve_chat_username(db, args.user, args.query)
     contact = db.contact(username)
     display = contact.display_name if contact else username
-    print(f"exporting {display} ({username}) -> {args.format} ...")
+    since = _parse_cursor(args.since, "--since")
+    print(f"exporting {display} ({username}) -> {args.format} "
+          f"({'incremental since ' + args.since if since else 'full'}) ...")
     total = db.count_messages(username) or 0
     media_svc = None
     if args.media:
@@ -492,7 +509,7 @@ def cmd_export(args) -> int:
     try:
         outcome = ChatExportService(db, account_exports_dir(account.account_id)).export(
             username, args.format, progress=progress, output_path=Path(args.out) if args.out else None,
-            include_media=args.media, media=media_svc,
+            include_media=args.media, media=media_svc, since=since,
         )
     except Exception as exc:
         raise KeyagentError(10, f"export failed: {exc}") from exc

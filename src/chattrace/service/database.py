@@ -485,8 +485,15 @@ class DatabaseService:
         username: str,
         limit: int,
         before: tuple[int, int] | None,
+        since: tuple[int, int] | None = None,
+        ascending: bool = False,
     ) -> tuple[list[dict], bool]:
-        """Keyset-paginated raw rows across shards (newest-first by (create_time, local_id)).
+        """Keyset-paginated raw rows across shards, ordered by (create_time, local_id).
+
+        Default (``ascending=False``) walks newest-first with ``before`` as the
+        exclusive upper bound; ``ascending=True`` walks oldest-first with ``since``
+        as the exclusive lower bound, which lets a caller stream a whole chat
+        forward without buffering every page.
 
         Returns dict rows aligned to the union of columns found on the shards; a shard
         missing one of the wanted columns is skipped, and cells missing on a shard are None.
@@ -517,14 +524,27 @@ class DatabaseService:
                 continue  # incompatible shard layout: skip
             usable = [c for c in columns if c in shard_cols]
             select = ", ".join(f"[{c}]" for c in usable)
-            where = ""
+            conditions: list[str] = []
             params: list = []
-            if before is not None:
-                where = "WHERE (create_time < ?) OR (create_time = ? AND local_id < ?)"
-                params = [before[0], before[0], before[1]]
+            if ascending:
+                # forward paging: only the exclusive lower bound applies
+                if since is not None:
+                    conditions.append("(create_time > ? OR (create_time = ? AND local_id > ?))")
+                    params += [since[0], since[0], since[1]]
+                order = "ASC"
+            else:
+                if before is not None:
+                    conditions.append("(create_time < ? OR (create_time = ? AND local_id < ?))")
+                    params += [before[0], before[0], before[1]]
+                if since is not None:
+                    conditions.append("(create_time > ? OR (create_time = ? AND local_id > ?))")
+                    params += [since[0], since[0], since[1]]
+                order = "DESC"
+            where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
             con = self._connect_raw(db)
             try:
-                sql = f"SELECT {select} FROM [{table}] {where} ORDER BY create_time DESC, local_id DESC LIMIT ?"
+                sql = (f"SELECT {select} FROM [{table}] {where} "
+                       f"ORDER BY create_time {order}, local_id {order} LIMIT ?")
                 db_rows = con.execute(sql, [*params, limit + 1]).fetchall()
             finally:
                 con.close()
@@ -532,7 +552,10 @@ class DatabaseService:
                 rec = dict(zip(usable, row))
                 rec["_shard"] = db
                 collected.append({c: rec.get(c) for c in columns} | {"_shard": db})
-        collected.sort(key=lambda r: (int(r["create_time"]), int(r["local_id"])), reverse=True)
+        collected.sort(
+            key=lambda r: (int(r["create_time"]), int(r["local_id"])),
+            reverse=not ascending,
+        )
         has_more = len(collected) > limit
         return collected[:limit], has_more
 
@@ -594,19 +617,29 @@ class DatabaseService:
                 return rec
         return None
 
-    def iter_chat_all(self, username: str) -> Iterator[MessageView]:
-        """All messages oldest-first (used by exporters)."""
-        cursor: tuple[int, int] | None = None
+    def iter_chat_all(
+        self,
+        username: str,
+        since: tuple[int, int] | None = None,
+    ) -> Iterator[MessageView]:
+        """All messages oldest-first, streamed forward (used by exporters).
+
+        ``since`` is an exclusive ``(create_time, local_id)`` cursor: only messages
+        strictly newer than it are yielded, which is what incremental exports need.
+
+        Paging runs ascending so a page is yielded as soon as it is read: buffering
+        every page first would be needed to fix up an order that is simply wrong.
+        """
+        cursor: tuple[int, int] | None = since
         while True:
-            rows, has_more = self._chat_page_rows(username, 2000, cursor)
+            rows, has_more = self._chat_page_rows(username, 2000, None, cursor, ascending=True)
             if not rows:
                 break
-            for msg in reversed(_build_views(self, username, rows)):
-                yield msg
+            yield from _build_views(self, username, rows)
             if not has_more:
                 break
-            oldest = rows[-1]
-            cursor = (int(oldest["create_time"]), int(oldest["local_id"]))
+            newest = rows[-1]
+            cursor = (int(newest["create_time"]), int(newest["local_id"]))
 
 
 def _as_text(value: Any) -> str:

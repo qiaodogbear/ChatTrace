@@ -62,7 +62,11 @@ class ChatExportService:
         output_path: Path | None = None,
         include_media: bool = False,
         media=None,  # Optional[MediaService]
+        since: tuple[int, int] | None = None,
     ) -> ExportOutcome:
+        """Export one chat.  ``since`` is an exclusive ``(create_time, local_id)``
+        cursor, so passing the newest cursor of a previous run yields only the
+        messages that arrived afterwards (incremental export)."""
         if fmt not in ("txt", "json", "html"):
             raise ExportError(f"unsupported format: {fmt}")
         contact = self.db.contact(username)
@@ -82,11 +86,11 @@ class ChatExportService:
         count = 0
         with open(output_path, "w", encoding="utf-8", newline="") as fh:
             if fmt == "txt":
-                count = self._write_txt(fh, username, display, progress, include_media, media)
+                count = self._write_txt(fh, username, display, progress, include_media, media, since)
             elif fmt == "json":
-                count = self._write_json(fh, username, display, progress, include_media, media)
+                count = self._write_json(fh, username, display, progress, include_media, media, since)
             else:
-                count = self._write_html(fh, username, display, progress, include_media, media, output_path)
+                count = self._write_html(fh, username, display, progress, include_media, media, output_path, since)
         return ExportOutcome(
             username=username,
             display_name=display,
@@ -114,14 +118,16 @@ class ChatExportService:
 
     # ---------------------------------------------------------------- writers
     def _write_txt(self, fh, username: str, display: str, progress: ProgressCallback | None,
-                   include_media: bool = False, media=None) -> int:
+                   include_media: bool = False, media=None, since: tuple[int, int] | None = None) -> int:
         exported_at = datetime.now()
         fh.write(f"Chat: {display}\n")
         fh.write(f"Username: {username}\n")
         fh.write(f"Exported At: {exported_at.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        if since is not None:
+            fh.write(f"Since: {since[0]},{since[1]}\n")
         fh.write("-" * 60 + "\n")
         count = 0
-        for msg in self.db.iter_chat_all(username):
+        for msg in self.db.iter_chat_all(username, since):
             line = f"[{_ts(msg.create_time)}] {msg.sender}: {msg.text}"
             if msg.links:
                 extras = [link for link in msg.links if link not in msg.text]
@@ -135,8 +141,9 @@ class ChatExportService:
             progress(count, None)
         return count
 
-    def _message_dicts(self, username: str, progress: ProgressCallback | None, include_media: bool = False, media=None):
-        for msg in self.db.iter_chat_all(username):
+    def _message_dicts(self, username: str, progress: ProgressCallback | None, include_media: bool = False,
+                       media=None, since: tuple[int, int] | None = None):
+        for msg in self.db.iter_chat_all(username, since):
             item = None
             if include_media and media is not None and msg.kind in ("image", "voice", "video"):
                 try:
@@ -161,7 +168,7 @@ class ChatExportService:
             }
 
     def _write_json(self, fh, username: str, display: str, progress: ProgressCallback | None,
-                    include_media: bool = False, media=None) -> int:
+                    include_media: bool = False, media=None, since: tuple[int, int] | None = None) -> int:
         exported_at = datetime.now()
         count = 0
         fh.write('{"meta":')
@@ -171,6 +178,8 @@ class ChatExportService:
                 "display_name": display,
                 "exported_at": exported_at.strftime("%Y-%m-%d %H:%M:%S"),
                 "total": self._total_for(username),
+                "incremental": since is not None,
+                "since": f"{since[0]},{since[1]}" if since is not None else None,
                 "media": bool(include_media),
             },
             fh,
@@ -178,21 +187,36 @@ class ChatExportService:
         )
         fh.write(',"messages":[')
         first = True
-        for item in self._message_dicts(username, progress, include_media, media):
+        cursor: tuple[int, int] | None = None
+        for item in self._message_dicts(username, progress, include_media, media, since):
             if not first:
                 fh.write(",")
             json.dump(item, fh, ensure_ascii=False)
             first = False
             count += 1
+            cursor = (int(item["create_time"]), int(item["local_id"]))
             if progress and count % 500 == 0:
                 progress(count, None)
-        fh.write("]}")
+        # ``next_since`` is the cursor to hand back on the following run; it is
+        # echoed even for an empty result so a poller never loses its place.
+        next_cursor = cursor if cursor is not None else since
+        fh.write("]")
+        fh.write(',"next_since":')
+        json.dump(
+            f"{next_cursor[0]},{next_cursor[1]}" if next_cursor is not None else None,
+            fh,
+            ensure_ascii=False,
+        )
+        fh.write(',"exported":')
+        fh.write(str(count))
+        fh.write("}")
         if progress:
             progress(count, None)
         return count
 
     def _write_html(self, fh, username: str, display: str, progress: ProgressCallback | None,
-                    include_media: bool = False, media=None, output_path: Path | None = None) -> int:
+                    include_media: bool = False, media=None, output_path: Path | None = None,
+                    since: tuple[int, int] | None = None) -> int:
         escaped_display = html.escape(display)
         fh.write(_HTML_HEAD.format(title=escaped_display))
         fh.write(f"<h1>{escaped_display}</h1>\n")
@@ -204,7 +228,7 @@ class ChatExportService:
             assets_dir.mkdir(parents=True, exist_ok=True)
         media_stats = {"image": 0, "voice": 0, "video": 0, "skipped": 0}
         count = 0
-        for msg in self.db.iter_chat_all(username):
+        for msg in self.db.iter_chat_all(username, since):
             bubble = "me" if msg.is_outgoing else "peer"
             name = "我" if msg.is_outgoing else html.escape(msg.sender)
             tag = ""

@@ -130,3 +130,88 @@ def test_export_formats(tree: Path, tmp_path: Path) -> None:
     html_text = out_html.output_path.read_text(encoding="utf-8")
     assert "<html" in html_text and "msg me" in html_text and "msg peer" in html_text
     assert "图片" in html_text
+
+
+# ------------------------------------------------------- ordering & incremental
+
+def _append_messages(tree: Path, count: int, start_time: int) -> None:
+    """Append ``count`` text messages so the 2000-row page boundary is crossed."""
+    con = sqlite3.connect(tree / "message" / "message_0.db")
+    table = _msg_table(CONTACT_USER)
+    con.executemany(
+        f"INSERT INTO [{table}] VALUES (?, 1, ?, 3, 2, ?, '', NULL)",
+        [(1000 + i, start_time + i, f"line {i}") for i in range(count)],
+    )
+    con.commit()
+    con.close()
+
+
+def test_iter_chat_all_is_strictly_ascending(tree: Path) -> None:
+    db = DatabaseService(ACCOUNT_ID, tree)
+    assert [m.create_time for m in db.iter_chat_all(CONTACT_USER)] == [100, 200, 300, 400]
+
+
+def test_iter_chat_all_is_ascending_across_page_boundary(tree: Path) -> None:
+    """Regression: paging newest-first then reversing per page reordered the timeline."""
+    _append_messages(tree, 2500, start_time=1000)
+    db = DatabaseService(ACCOUNT_ID, tree)
+    keys = [(m.create_time, m.local_id) for m in db.iter_chat_all(CONTACT_USER)]
+    assert len(keys) == 2504
+    assert keys == sorted(keys)
+    assert keys == sorted(set(keys))          # nothing yielded twice
+    assert keys[0] == (100, 1)
+    assert keys[-1] == (1000 + 2499, 1000 + 2499)
+
+
+def test_iter_chat_all_since_cursor_is_exclusive(tree: Path) -> None:
+    db = DatabaseService(ACCOUNT_ID, tree)
+    assert [m.create_time for m in db.iter_chat_all(CONTACT_USER, (200, 2))] == [300, 400]
+    assert list(db.iter_chat_all(CONTACT_USER, (400, 4))) == []
+    # same create_time: the local_id half of the cursor breaks the tie
+    assert [m.local_id for m in db.iter_chat_all(CONTACT_USER, (200, 1))] == [2, 3, 4]
+
+
+def test_iter_chat_all_since_across_page_boundary(tree: Path) -> None:
+    """A cursor read must also stay ordered when it spans more than one page."""
+    _append_messages(tree, 2500, start_time=1000)
+    db = DatabaseService(ACCOUNT_ID, tree)
+    tail = [(m.create_time, m.local_id) for m in db.iter_chat_all(CONTACT_USER, (1200, 1200))]
+    assert tail == sorted(tail)
+    assert tail[0] == (1201, 1201)
+    assert tail[-1] == (3499, 3499)
+    assert len(tail) == 2299                      # > one 2000-row page
+
+
+def test_export_since_emits_only_newer_messages(tree: Path, tmp_path: Path) -> None:
+    db = DatabaseService(ACCOUNT_ID, tree)
+    svc = ChatExportService(db, tmp_path / "exports")
+
+    full_path = tmp_path / "full.json"
+    svc.export(CONTACT_USER, "json", output_path=full_path)
+    full = json.loads(full_path.read_text(encoding="utf-8"))
+    assert full["meta"]["incremental"] is False and full["meta"]["since"] is None
+    assert full["exported"] == 4 and full["next_since"] == "400,4"
+
+    inc_path = tmp_path / "inc.json"
+    outcome = svc.export(CONTACT_USER, "json", output_path=inc_path, since=(200, 2))
+    payload = json.loads(inc_path.read_text(encoding="utf-8"))
+    assert outcome.message_count == 2
+    assert payload["meta"]["incremental"] is True and payload["meta"]["since"] == "200,2"
+    assert payload["exported"] == 2 and payload["next_since"] == "400,4"
+    assert [m["create_time"] for m in payload["messages"]] == [300, 400]
+
+    empty_path = tmp_path / "empty.json"
+    svc.export(CONTACT_USER, "json", output_path=empty_path, since=(400, 4))
+    tail = json.loads(empty_path.read_text(encoding="utf-8"))
+    assert tail["exported"] == 0 and tail["messages"] == []
+    assert tail["next_since"] == "400,4"      # a poller never loses its place
+
+
+def test_export_since_txt_marks_the_cursor(tree: Path, tmp_path: Path) -> None:
+    db = DatabaseService(ACCOUNT_ID, tree)
+    svc = ChatExportService(db, tmp_path / "exports")
+    out = svc.export(CONTACT_USER, "txt", since=(200, 2))
+    text = out.output_path.read_text(encoding="utf-8")
+    assert "Since: 200,2" in text
+    assert out.message_count == 2
+    assert "你好，在吗？" not in text
