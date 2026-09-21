@@ -137,7 +137,7 @@ ChatTrace 自己实现了这套解密内核：逐库独立派生、逐页 AES-CB
 | **浏览** | 会话 / 联系人 / 消息时间线；发送方向识别、**分片级发送者解析**、链接提取、系统消息居中显示 |
 | **消息解析** | 解压 Zstandard 压缩的消息体，从 XML 中提取媒体元数据；按类型渲染为卡片：图片、语音、视频、文件、链接、引用、小程序、位置、通话、名片、表情 |
 | **媒体** | 图片 dat 解密（**旧格式与 V2 容器均离线直解**：V2 密钥由 kvcomm code + wxid 派生并用本账号图片校验）、**语音 SILK→WAV 界面内直接播放**、视频与缩略图归档 |
-| **导出** | 单会话全量 **txt / json / html**；`--media` 时 HTML 附 `<会话>_assets/` 媒体目录（图片 + 可播放 WAV），txt/json 附媒体状态与元数据 |
+| **导出** | 单会话 **txt / json / html**；`--since` 游标支持**增量导出**（JSON 回传 `next_since`），配合 `scripts/poll_chat.py` 可按群聊名称定时增量拉取；`--media` 时 HTML 附 `<会话>_assets/` 媒体目录（图片 + 可播放 WAV），txt/json 附媒体状态与元数据 |
 | **Web UI** | 引导式 5 步流程（选账号 → 密钥 → 解密 → 浏览 → 导出）；零第三方前端依赖，单机 `127.0.0.1` |
 | **分发** | PyInstaller 打包为免安装 exe（内置 Python 运行时与 Frida agent），双击即用 |
 
@@ -384,6 +384,7 @@ tests/                   # 106 个用例：解密往返、跨分片发送者、�
 | 文档 | 内容 |
 | --- | --- |
 | [新手图文指南](docs/beginner_guide.md) | 五步上手（带截图）、FAQ、错误码对照表、清理方式 |
+| [增量拉取指南](docs/agent_usage.md) | 给定群聊名称持续增量拉取：`poll_chat.py` 用法、JSON 字段表、游标语义与故障排查 |
 | [媒体格式与解密笔记](docs/media-format-notes.md) | 图片 dat 三态与 V2 密钥离线派生、语音存放位置、消息↔文件关联方式与跨分片陷阱 |
 | [NOTICE.md](NOTICE.md) / [REFERENCES.md](REFERENCES.md) | 第三方许可、参考来源、合规边界 |
 | [发布说明](https://github.com/qiaodogbear/ChatTrace/releases) | 各版本的新增能力与已知限制 |
